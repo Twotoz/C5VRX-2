@@ -485,6 +485,7 @@
     if (port?.readable || port?.writable) {
       try { await port.close(); } catch (_) {}
     }
+    port = null;
     $("stopTerminal").disabled = true;
     setConnected(false);
   }
@@ -495,6 +496,7 @@
     }
     transport = null;
     loader = null;
+    port = null;
     $("flash").disabled = true;
     setConnected(false);
   }
@@ -563,12 +565,10 @@
         },
       });
       setProgress(100);
-      setStatus("ok", "Complete", "Flash finished. Resetting ESP32-C5…");
-      line("Flash complete. Hard reset...");
-      await loader.after("hard_reset");
+      setStatus("ok", "Complete", "Flash finished. Press RESET once, then open Terminal.");
+      line("Flash complete. Disconnecting bootloader...");
       await disconnectLoader();
-      setStatus("ok", "Complete", "Reset complete. Open Terminal to view boot/runtime output.");
-      line("Reset done. Open Terminal to view boot/runtime output.");
+      line("Press RESET once without holding BOOT. Wait 2 seconds, then Open Terminal and select the port again.");
     } catch (e) {
       error(e);
     }
@@ -578,7 +578,9 @@
     try {
       await disconnectLoader();
       await stopTerminal();
-      if (!port) port = await navigator.serial.requestPort();
+      // A reset re-enumerates native USB Serial/JTAG as a new device. Always
+      // ask the browser for the current port instead of reusing a stale one.
+      port = await navigator.serial.requestPort();
       await port.open({ baudRate: 115200 });
       terminalRunning = true;
       $("stopTerminal").disabled = false;
@@ -600,6 +602,10 @@
         try { terminalReader.releaseLock(); } catch (_) {}
         terminalReader = null;
       }
+      if (port?.readable || port?.writable) {
+        try { await port.close(); } catch (_) {}
+      }
+      port = null;
       $("stopTerminal").disabled = true;
       setConnected(false);
     }
