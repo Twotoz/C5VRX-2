@@ -379,9 +379,9 @@
         </div>
 
         <div class="button-row">
-          <button id="connect">Connect Bootloader</button>
-          <button id="flash" class="primary" disabled>Flash Firmware</button>
-          <button id="terminal">Open Terminal</button>
+          <button id="connect">1. Connect for Flashing</button>
+          <button id="flash" class="primary" disabled>2. Flash Firmware</button>
+          <button id="terminal">Open Terminal (no flash)</button>
           <button id="stopTerminal" disabled>Stop Terminal</button>
         </div>
 
@@ -576,6 +576,12 @@
 
   $("terminal").onclick = async () => {
     try {
+      if (loader) {
+        await disconnectLoader();
+        setStatus("busy", "Reset required", "Press RESET once without BOOT, wait 2 seconds, then click Open Terminal again.");
+        line("Bootloader disconnected. Press RESET once without holding BOOT. Wait 2 seconds, then click Open Terminal again.");
+        return;
+      }
       await disconnectLoader();
       await stopTerminal();
       // A reset re-enumerates native USB Serial/JTAG as a new device. Always
