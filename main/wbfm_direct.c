@@ -14,7 +14,7 @@ BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_direct6_4to1_program,
 #define LUT_WORDS 1024u
 #define PI_F 3.14159265358979323846f
 #define CVBS_ZERO_CODE 20u
-#define CVBS_GAIN_SHIFT 1u
+#define CVBS_GAIN_SHIFT 0u
 #define PHASE_BIAS (CVBS_ZERO_CODE << CVBS_GAIN_SHIFT)
 
 static float coarse_center(unsigned code5)
@@ -31,8 +31,8 @@ static void build_phase8_lut(uint16_t lut[LUT_WORDS])
             if (p < 0.0f) p += 2.0f * PI_F;
             const uint8_t phase = (uint8_t)lrintf(p * (256.0f / (2.0f * PI_F)));
             /* Inverted wrapped discriminator: bias + previous phase - current
-             * phase. Emitting bits 1..6 maps zero deviation to DAC code 20 at
-             * 2x gain, leaving headroom above video while sync approaches 0. */
+             * phase. Emitting bits 0..5 maps zero deviation to DAC code 20 at
+             * 4x gain so the Fatshark input receives a usable sync excursion. */
             lut[(i5 << 5) | q5] =
                 (uint16_t)(uint8_t)(0u - phase) |
                 ((uint16_t)(uint8_t)(PHASE_BIAS + phase) << 8);

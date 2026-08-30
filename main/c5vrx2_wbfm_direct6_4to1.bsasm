@@ -1,5 +1,5 @@
 # Packed C5 Q10/I10 -> inverted six-bit phase delta, decimate 4:1.
-# O0..O5 drive the six-resistor DAC; zero deviation is code 20 at 2x gain.
+# O0..O5 drive the six-resistor DAC; zero deviation is code 20 at 4x gain.
 
 cfg prefetch true
 # The 64 KiB input GDMA descriptor is cyclic. Do not terminate/reset the
@@ -10,7 +10,7 @@ cfg trailing_bytes 0
 cfg lut_width_bits 16
 
 init:
-    LDCTDBL 40
+    LDCTDBL 20
 
 sample_address:
     set 22..26 5..9,
@@ -25,7 +25,7 @@ phase_add:
     ADDCTIBL
 
 emit_and_remember:
-    set 0..5 B1..B6,
+    set 0..5 B0..B5,
     set 16..23 O0..O7,
     read 32,
     write 8,
