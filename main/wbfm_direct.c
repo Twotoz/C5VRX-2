@@ -13,9 +13,7 @@ BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_direct6_4to1_program,
 
 #define LUT_WORDS 1024u
 #define PI_F 3.14159265358979323846f
-#define CVBS_ZERO_CODE 20u
-#define CVBS_GAIN_SHIFT 0u
-#define PHASE_BIAS (CVBS_ZERO_CODE << CVBS_GAIN_SHIFT)
+#define CVBS_ZERO_CODE 15u
 
 static float coarse_center(unsigned code5)
 {
@@ -23,19 +21,21 @@ static float coarse_center(unsigned code5)
     return (float)signed5 * 32.0f + 15.5f;
 }
 
-static void build_phase8_lut(uint16_t lut[LUT_WORDS])
+static void build_phase6_lut(uint16_t lut[LUT_WORDS])
 {
     for (unsigned i5 = 0; i5 < 32u; ++i5) {
         for (unsigned q5 = 0; q5 < 32u; ++q5) {
             float p = atan2f(coarse_center(q5), coarse_center(i5));
             if (p < 0.0f) p += 2.0f * PI_F;
-            const uint8_t phase = (uint8_t)lrintf(p * (256.0f / (2.0f * PI_F)));
-            /* Inverted wrapped discriminator: bias + previous phase - current
-             * phase. Emitting bits 0..5 maps zero deviation to DAC code 20 at
-             * 4x gain so the Fatshark input receives a usable sync excursion. */
+            const uint8_t phase =
+                (uint8_t)lrintf(p * (64.0f / (2.0f * PI_F))) & 0x3fu;
+            /* Donor-proven modulo-64 discriminator: bias + current - previous.
+             * The four-input-word cadence already measures phase across the
+             * effective 20 MS/s output interval; using phase8 here adds an
+             * unintended 4x gain and wraps ordinary video deviation. */
             lut[(i5 << 5) | q5] =
-                (uint16_t)(uint8_t)(0u - phase) |
-                ((uint16_t)(uint8_t)(PHASE_BIAS + phase) << 8);
+                (uint16_t)phase |
+                ((uint16_t)((CVBS_ZERO_CODE - phase) & 0x3fu) << 8);
         }
     }
 }
@@ -47,7 +47,7 @@ esp_err_t c5vrx2_wbfm_direct_create(bitscrambler_handle_t *out)
     uint16_t *lut = heap_caps_malloc(LUT_WORDS * sizeof(uint16_t),
                                      MALLOC_CAP_INTERNAL);
     if (!lut) return ESP_ERR_NO_MEM;
-    build_phase8_lut(lut);
+    build_phase6_lut(lut);
 
     const bitscrambler_config_t cfg = {
         .dir = BITSCRAMBLER_DIR_TX,
