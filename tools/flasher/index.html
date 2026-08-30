@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>C5VRX-2 Flasher</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { max-width: 900px; margin: 32px auto; padding: 0 16px; background: #0b0d10; color: #e9edf1; }
+    h1 { font-size: 22px; margin-bottom: 6px; }
+    p { color: #aeb8c2; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+    button, input::file-selector-button { font: inherit; padding: 9px 12px; border: 1px solid #39424c; border-radius: 7px; background: #171b20; color: #eef3f7; cursor: pointer; }
+    button:disabled { opacity: .4; cursor: default; }
+    input[type=file] { width: 100%; }
+    progress { width: 100%; height: 18px; }
+    pre { min-height: 330px; max-height: 58vh; overflow: auto; padding: 14px; border: 1px solid #2c343d; border-radius: 8px; background: #050607; white-space: pre-wrap; word-break: break-word; }
+    .ok { color: #a7f3a7; }
+    .warn { color: #ffd27a; }
+  </style>
+</head>
+<body>
+  <h1>C5VRX-2 flasher</h1>
+  <p>One merged ESP32-C5 image at <code>0x0</code>. Chrome/Edge + Web Serial.</p>
+
+  <input id="firmware" type="file" accept=".bin,application/octet-stream">
+  <div class="row">
+    <button id="connect">Connect bootloader</button>
+    <button id="flash" disabled>Flash merged .bin</button>
+    <button id="terminal">Open 115200 terminal</button>
+    <button id="stopTerminal" disabled>Stop terminal</button>
+    <button id="clear">Clear</button>
+  </div>
+  <progress id="progress" max="100" value="0"></progress>
+  <pre id="log"></pre>
+
+<script type="module">
+  import { ESPLoader, Transport } from "https://unpkg.com/esptool-js@0.6.1/lib/index.js?module";
+
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  const progress = $("progress");
+  let port = null;
+  let transport = null;
+  let loader = null;
+  let terminalReader = null;
+  let terminalRunning = false;
+
+  function log(text = "") {
+    logEl.textContent += String(text);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function line(text = "") { log(text + "\n"); }
+  function error(err) { line("ERROR: " + (err?.message ?? err)); }
+
+  const loaderTerminal = {
+    clean() {},
+    write(data) { log(data); },
+    writeLine(data) { line(data); },
+  };
+
+  async function stopTerminal() {
+    terminalRunning = false;
+    if (terminalReader) {
+      try { await terminalReader.cancel(); } catch (_) {}
+      try { terminalReader.releaseLock(); } catch (_) {}
+      terminalReader = null;
+    }
+    if (port?.readable || port?.writable) {
+      try { await port.close(); } catch (_) {}
+    }
+    $("stopTerminal").disabled = true;
+  }
+
+  async function disconnectLoader() {
+    if (transport) {
+      try { await transport.disconnect(); } catch (_) {}
+    }
+    transport = null;
+    loader = null;
+    $("flash").disabled = true;
+  }
+
+  $("connect").onclick = async () => {
+    try {
+      if (!("serial" in navigator)) throw new Error("Web Serial is unavailable. Use Chrome or Edge over HTTPS/localhost.");
+      await stopTerminal();
+      await disconnectLoader();
+      port = await navigator.serial.requestPort();
+      transport = new Transport(port, true);
+      loader = new ESPLoader({
+        transport,
+        baudrate: 460800,
+        terminal: loaderTerminal,
+        debugLogging: false,
+      });
+      line("Connecting...");
+      const chip = await loader.main();
+      line(`Connected: ${chip}`);
+      $("flash").disabled = false;
+    } catch (e) {
+      error(e);
+      await disconnectLoader();
+    }
+  };
+
+  $("flash").onclick = async () => {
+    try {
+      if (!loader) throw new Error("Connect bootloader first.");
+      const file = $("firmware").files[0];
+      if (!file) throw new Error("Choose c5vrx2-full.bin first.");
+      if (!/\.bin$/i.test(file.name)) throw new Error("Firmware must be a .bin file.");
+      const data = new Uint8Array(await file.arrayBuffer());
+      if (data.length < 4096) throw new Error("File is too small to be a merged firmware image.");
+
+      line(`Flashing ${file.name} (${data.length} bytes) at 0x00000000...`);
+      progress.value = 0;
+      await loader.writeFlash({
+        fileArray: [{ data, address: 0x0 }],
+        flashMode: "keep",
+        flashFreq: "keep",
+        flashSize: "keep",
+        eraseAll: false,
+        compress: true,
+        reportProgress: (_fileIndex, written, total) => {
+          progress.value = total ? (written * 100 / total) : 0;
+        },
+      });
+      progress.value = 100;
+      line("Flash complete. Hard reset...");
+      await loader.after("hard_reset");
+      await disconnectLoader();
+      line("Reset done. Open Terminal to view boot/runtime output.");
+    } catch (e) {
+      error(e);
+    }
+  };
+
+  $("terminal").onclick = async () => {
+    try {
+      await disconnectLoader();
+      await stopTerminal();
+      if (!port) port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      terminalRunning = true;
+      $("stopTerminal").disabled = false;
+      line("--- terminal 115200 ---");
+      const decoder = new TextDecoder();
+      terminalReader = port.readable.getReader();
+      while (terminalRunning) {
+        const { value, done } = await terminalReader.read();
+        if (done) break;
+        if (value) log(decoder.decode(value, { stream: true }));
+      }
+    } catch (e) {
+      if (terminalRunning) error(e);
+    } finally {
+      terminalRunning = false;
+      if (terminalReader) {
+        try { terminalReader.releaseLock(); } catch (_) {}
+        terminalReader = null;
+      }
+      $("stopTerminal").disabled = true;
+    }
+  };
+
+  $("stopTerminal").onclick = stopTerminal;
+  $("clear").onclick = () => { logEl.textContent = ""; };
+
+  if (!("serial" in navigator)) {
+    line("Web Serial unavailable: use Chrome/Edge on HTTPS or localhost.");
+  } else {
+    line("Ready. Select merged firmware, connect bootloader, flash, then open terminal.");
+  }
+</script>
+</body>
+</html>
