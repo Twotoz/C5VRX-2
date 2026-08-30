@@ -1,12 +1,24 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 
 #include "wifi5.h"
 #include "rf_dump.h"
 #include "realtime.h"
 
 static const char *TAG = "c5vrx2";
+
+static esp_err_t init_nvs(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        err = nvs_flash_erase();
+        if (err == ESP_OK) err = nvs_flash_init();
+    }
+    return err;
+}
 
 void app_main(void)
 {
@@ -20,7 +32,13 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(1000u));
     }
 
-    esp_err_t err = c5vrx2_wifi5_start_a1();
+    esp_err_t err = init_nvs();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = c5vrx2_wifi5_start_a1();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "A1 RF init failed: %s", esp_err_to_name(err));
         return;
