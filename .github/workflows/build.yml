@@ -17,3 +17,10 @@ jobs:
           source /opt/esp/idf/export.sh
           idf.py set-target esp32c5
           idf.py build
+          idf.py merge-bin -o c5vrx2-full.bin -f raw
+      - name: Upload merged firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: c5vrx2-full
+          path: build/c5vrx2-full.bin
+          if-no-files-found: error
