@@ -417,7 +417,8 @@
   </main>
 
 <script type="module">
-  import { ESPLoader, Transport } from "https://unpkg.com/esptool-js@0.6.1/lib/index.js?module";
+  let ESPLoader = null;
+  let Transport = null;
 
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
@@ -465,6 +466,9 @@
     line("ERROR: " + message);
   }
 
+  window.addEventListener("error", (event) => error(event.error || event.message));
+  window.addEventListener("unhandledrejection", (event) => error(event.reason));
+
   const loaderTerminal = {
     clean() {},
     write(data) { log(data); },
@@ -507,7 +511,15 @@
       setStatus("busy", "Connecting", "Opening ESP32-C5 bootloader…");
       await stopTerminal();
       await disconnectLoader();
+      // requestPort() must run directly from the button gesture. Ask for the
+      // device before loading esptool so Edge/Chrome always shows its chooser.
       port = await navigator.serial.requestPort();
+      setStatus("busy", "Loading", "Loading Espressif flasher support…");
+      if (!ESPLoader || !Transport) {
+        const esptool = await import("https://unpkg.com/esptool-js@0.6.1/bundle.js");
+        ESPLoader = esptool.ESPLoader;
+        Transport = esptool.Transport;
+      }
       transport = new Transport(port, true);
       loader = new ESPLoader({
         transport,
