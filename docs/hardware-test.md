@@ -2,6 +2,20 @@
 
 This gate is intentionally lower-level than recognizable video.
 
+## Flash the exact PR build
+
+1. Open the latest successful **C5VRX-2 realtime build** run for this PR.
+2. Download and unzip artifact `c5vrx2-full`.
+3. Verify `c5vrx2-full.bin` against `c5vrx2-full.bin.sha256`.
+4. Serve the unzipped directory from localhost (for example with
+   `python -m http.server 8000`) and open `http://localhost:8000/flasher.html`
+   in Chrome or Edge.
+5. If the XIAO is not detected automatically, hold **BOOT**, press and release
+   **RESET**, then release **BOOT**.
+6. Select `c5vrx2-full.bin`, connect the bootloader and flash it at `0x0`.
+
+The bundle's `FIRMWARE-COMMIT.txt` identifies the exact PR commit under test.
+
 ## Physical XIAO AV wiring
 
 Use the resistor network that is actually fitted to the current XIAO ESP32-C5 test hardware:
@@ -21,14 +35,21 @@ These are intentionally the current real component values. Older C5VRX calculati
 
 ## Test
 
-1. Boot XIAO ESP32-C5 with VTX OFF.
-2. RF initializes and tunes A1 / 5865 MHz automatically.
-3. IQ producer starts automatically; no USB command is required.
-4. Observe asynchronous counters only: blocks, rearms, rearm_failures, boundary cycles, PARLIO underruns.
-5. Confirm counters continue with VTX OFF.
-6. Turn VTX ON while the producer remains armed.
-7. Confirm output waveform/statistics change without any capture/start/rearm command from USB.
-8. Turn VTX OFF again; producer must continue.
-9. Accept only if rearm_failures remain zero and RF lifecycle is independent of USB and video classification.
+1. Power the FatShark/XIAO with the VTX OFF and reset the XIAO.
+2. Optionally open the 115200 terminal immediately after reset. Before the HP
+   core parks, it must print the A1 / 5865 MHz tune and `REALTIME ARM` lines.
+3. Confirm the FatShark AV input is active with a changing static-like waveform.
+   The IQ producer starts automatically; no USB command is required.
+4. Turn the A1 / 5865 MHz VTX ON without resetting or reconnecting USB.
+5. Confirm the physical AV output changes while the producer remains running.
+6. Turn the VTX OFF again and confirm the output continues instead of stopping.
+7. Leave it running for at least 60 seconds and repeat OFF -> ON -> OFF once.
+8. Reject the run if USB prints `REALTIME STOP`, the AV output freezes/stops, or
+   the XIAO resets. A `REALTIME STOP` line includes the stored rearm/fault data.
+
+During a healthy run the HP core is deliberately parked while the MAC owns RF
+SRAM. Live counters and periodic USB logs are therefore **not** expected. The
+first gate is continuous, RF-dependent physical AV output plus absence of a
+stored terminal fault; it is not a live telemetry test.
 
 Recognizable video is a follow-on gate after the producer/consumer stream is physically proven.
