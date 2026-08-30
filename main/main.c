@@ -1,6 +1,4 @@
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "wifi5.h"
@@ -23,14 +21,6 @@ static esp_err_t init_nvs(void)
 void app_main(void)
 {
     ESP_LOGW(TAG, "C5VRX-2: raw realtime A1 receiver boot");
-
-    /* Native USB re-enumerates when the XIAO leaves the ROM bootloader. Give
-     * the hardware tester a deterministic window to reopen the terminal
-     * before HP is deliberately parked for RF-SRAM ownership. */
-    for (unsigned seconds = 10u; seconds > 0u; --seconds) {
-        ESP_LOGW(TAG, "diagnostic boot window: realtime starts in %u s", seconds);
-        vTaskDelay(pdMS_TO_TICKS(1000u));
-    }
 
     esp_err_t err = init_nvs();
     if (err != ESP_OK) {
