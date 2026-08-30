@@ -13,6 +13,9 @@ BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_direct6_4to1_program,
 
 #define LUT_WORDS 1024u
 #define PI_F 3.14159265358979323846f
+#define CVBS_ZERO_CODE 20u
+#define CVBS_GAIN_SHIFT 1u
+#define PHASE_BIAS (CVBS_ZERO_CODE << CVBS_GAIN_SHIFT)
 
 static float coarse_center(unsigned code5)
 {
@@ -27,10 +30,12 @@ static void build_phase8_lut(uint16_t lut[LUT_WORDS])
             float p = atan2f(coarse_center(q5), coarse_center(i5));
             if (p < 0.0f) p += 2.0f * PI_F;
             const uint8_t phase = (uint8_t)lrintf(p * (256.0f / (2.0f * PI_F)));
-            /* The direct program uses both +phase and 128-phase so one table
-             * add yields a wrapped, biased phase discriminator. */
+            /* Inverted wrapped discriminator: bias + previous phase - current
+             * phase. Emitting bits 1..6 maps zero deviation to DAC code 20 at
+             * 2x gain, leaving headroom above video while sync approaches 0. */
             lut[(i5 << 5) | q5] =
-                (uint16_t)phase | ((uint16_t)(uint8_t)(128u - phase) << 8);
+                (uint16_t)(uint8_t)(0u - phase) |
+                ((uint16_t)(uint8_t)(PHASE_BIAS + phase) << 8);
         }
     }
 }
