@@ -2,7 +2,10 @@
 # O0..O5 drive the six-resistor DAC; zero deviation is code 32.
 
 cfg prefetch true
-cfg eof_on upstream
+# The 64 KiB input GDMA descriptor is cyclic. Do not terminate/reset the
+# discriminator on its per-block EOF; PARLIO loop mode intentionally has no
+# downstream EOF, so IQ -> phase delta -> DAC remains continuous over rearms.
+cfg eof_on downstream
 cfg trailing_bytes 0
 cfg lut_width_bits 16
 
