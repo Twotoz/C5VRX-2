@@ -26,6 +26,7 @@ extern const uint8_t c5vrx2_lp_bin_end[]
 #define STATE_RUNNING  2u
 #define STATE_ERROR    3u
 #define STATE_STOPPED  4u
+#define TELEMETRY_MAGIC 0x43355232u
 
 static const char *TAG = "c5vrx2_rt";
 
@@ -55,6 +56,23 @@ static bool IRAM_ATTR __attribute__((noinline)) park_hp_until_terminal(void)
 
 esp_err_t c5vrx2_realtime_start(void)
 {
+    /* LP memory survives an HP software reset. Report the previous run before
+     * loading a fresh LP image; reading this snapshot does not touch the hot
+     * path and is never required to start the next run. */
+    if (ulp_c5vrx2_telemetry_magic == TELEMETRY_MAGIC &&
+        ulp_c5vrx2_rearms != 0u) {
+        const uint32_t rearms = ulp_c5vrx2_rearms;
+        const uint32_t min_cycles = ulp_c5vrx2_gap_cycles_min;
+        const uint32_t avg_cycles = ulp_c5vrx2_gap_cycles_total / rearms;
+        const uint32_t max_cycles = ulp_c5vrx2_gap_cycles_max;
+        ESP_LOGW(TAG,
+                 "PREVIOUS REARM gaps: min=%u cyc/%u ns avg=%u cyc/%u ns max=%u cyc/%u ns rearms=%u failures=%u",
+                 (unsigned)min_cycles, (unsigned)((min_cycles * 125u) / 6u),
+                 (unsigned)avg_cycles, (unsigned)((avg_cycles * 125u) / 6u),
+                 (unsigned)max_cycles, (unsigned)((max_cycles * 125u) / 6u),
+                 (unsigned)rearms, (unsigned)ulp_c5vrx2_rearm_failures);
+    }
+
     esp_err_t err = ulp_lp_core_load_binary(
         c5vrx2_lp_bin_start,
         (size_t)(c5vrx2_lp_bin_end - c5vrx2_lp_bin_start));
@@ -104,11 +122,14 @@ esp_err_t c5vrx2_realtime_start(void)
 
     c5vrx2_parlio_direct_destroy();
     ESP_LOGE(TAG,
-             "REALTIME STOP state=%u ran=%u blocks=%u rearms=%u failures=%u gap_last=%u gap_max=%u fault=%u addr=0x%08x pc=0x%08x",
+             "REALTIME STOP state=%u ran=%u blocks=%u rearms=%u failures=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u fault=%u addr=0x%08x pc=0x%08x",
              (unsigned)ulp_c5vrx2_state, ran ? 1u : 0u,
              (unsigned)ulp_c5vrx2_blocks,
              (unsigned)ulp_c5vrx2_rearms,
              (unsigned)ulp_c5vrx2_rearm_failures,
+             (unsigned)ulp_c5vrx2_gap_cycles_min,
+             (unsigned)(ulp_c5vrx2_rearms != 0u
+                 ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u),
              (unsigned)ulp_c5vrx2_gap_cycles_last,
              (unsigned)ulp_c5vrx2_gap_cycles_max,
              (unsigned)ulp_c5vrx2_fault_cause,

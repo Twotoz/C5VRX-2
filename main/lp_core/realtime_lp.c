@@ -38,6 +38,8 @@
 #define STATE_ERROR    3u
 #define STATE_STOPPED  4u
 
+#define TELEMETRY_MAGIC 0x43355232u /* "C5R2" */
+
 volatile uint32_t c5vrx2_command;
 volatile uint32_t c5vrx2_state;
 volatile uint32_t c5vrx2_runs;
@@ -45,8 +47,10 @@ volatile uint32_t c5vrx2_rearms;
 volatile uint32_t c5vrx2_rearm_failures;
 volatile uint32_t c5vrx2_blocks;
 volatile uint32_t c5vrx2_gap_cycles_last;
+volatile uint32_t c5vrx2_gap_cycles_min;
 volatile uint32_t c5vrx2_gap_cycles_max;
 volatile uint32_t c5vrx2_gap_cycles_total;
+volatile uint32_t c5vrx2_telemetry_magic;
 volatile uint32_t c5vrx2_last_pointer;
 volatile uint32_t c5vrx2_saved_ownership;
 volatile uint32_t c5vrx2_fault_cause;
@@ -167,8 +171,10 @@ static void run_continuous(void)
     c5vrx2_rearm_failures = 0u;
     c5vrx2_blocks = 0u;
     c5vrx2_gap_cycles_last = 0u;
+    c5vrx2_gap_cycles_min = UINT32_MAX;
     c5vrx2_gap_cycles_max = 0u;
     c5vrx2_gap_cycles_total = 0u;
+    c5vrx2_telemetry_magic = TELEMETRY_MAGIC;
     c5vrx2_stage = 1u;
 
     c5vrx2_saved_ownership = REG32(HP_SRAM_USAGE);
@@ -220,6 +226,8 @@ static void run_continuous(void)
                     const uint32_t gap = cycles() - completed_at;
                     c5vrx2_gap_cycles_last = gap;
                     c5vrx2_gap_cycles_total += gap;
+                    if (gap < c5vrx2_gap_cycles_min)
+                        c5vrx2_gap_cycles_min = gap;
                     if (gap > c5vrx2_gap_cycles_max)
                         c5vrx2_gap_cycles_max = gap;
                     c5vrx2_rearms++;
