@@ -1,4 +1,4 @@
-# Packed C5 Q10/I10 -> donor-accurate six-bit phase delta, decimate 4:1.
+# Packed C5 Q10/I10 -> inverted donor-scale six-bit phase delta, decimate 4:1.
 # O0..O5 drive the six-resistor DAC; zero deviation is calibrated code 15.
 
 cfg prefetch true

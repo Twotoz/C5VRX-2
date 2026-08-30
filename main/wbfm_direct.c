@@ -29,13 +29,16 @@ static void build_phase6_lut(uint16_t lut[LUT_WORDS])
             if (p < 0.0f) p += 2.0f * PI_F;
             const uint8_t phase =
                 (uint8_t)lrintf(p * (64.0f / (2.0f * PI_F))) & 0x3fu;
-            /* Donor-proven modulo-64 discriminator: bias + current - previous.
+            /* Donor-scale modulo-64 discriminator with measured AV polarity:
+             * bias + previous - current.  The non-inverted hardware test made
+             * the VTX-dependent horizontal sync features white; CVBS needs
+             * those pulses to move toward code zero.
              * The four-input-word cadence already measures phase across the
              * effective 20 MS/s output interval; using phase8 here adds an
              * unintended 4x gain and wraps ordinary video deviation. */
             lut[(i5 << 5) | q5] =
-                (uint16_t)phase |
-                ((uint16_t)((CVBS_ZERO_CODE - phase) & 0x3fu) << 8);
+                (uint16_t)((0u - phase) & 0x3fu) |
+                ((uint16_t)((CVBS_ZERO_CODE + phase) & 0x3fu) << 8);
         }
     }
 }
