@@ -1,0 +1,33 @@
+# Packed C5 Q10/I10 -> biased six-bit phase delta, decimate 4:1.
+# O0..O5 drive the six-resistor DAC; zero deviation is code 32.
+
+cfg prefetch true
+cfg eof_on upstream
+cfg trailing_bytes 0
+cfg lut_width_bits 16
+
+init:
+    LDCTDBL 128
+
+sample_address:
+    set 22..26 5..9,
+    set 27..31 15..19,
+    read 32,
+    jmp phase_add
+
+phase_add:
+    set 0..7 L8..L15,
+    set 16..23 L0..L7,
+    read 32,
+    ADDCTIBL
+
+emit_and_remember:
+    set 0..5 B2..B7,
+    set 16..23 O0..O7,
+    read 32,
+    write 8,
+    LDCTIBL
+
+decimate_fourth:
+    read 32,
+    jmp sample_address
