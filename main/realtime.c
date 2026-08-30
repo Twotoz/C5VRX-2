@@ -13,6 +13,14 @@
 #include "parlio_direct.h"
 #include "regdma_rearm.h"
 
+/* ulp_embed_binary() exposes the LP image through linker symbols, matching the
+ * proven C5VRX LP-core donor. The generated c5vrx2_lp.h only declares the LP
+ * shared variables, not these binary bounds. */
+extern const uint8_t c5vrx2_lp_bin_start[]
+    asm("_binary_c5vrx2_lp_bin_start");
+extern const uint8_t c5vrx2_lp_bin_end[]
+    asm("_binary_c5vrx2_lp_bin_end");
+
 #define CMD_CONTINUOUS 1u
 #define STATE_READY    1u
 #define STATE_RUNNING  2u
