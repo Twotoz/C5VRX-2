@@ -5,41 +5,430 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>C5VRX-2 Flasher</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    body { max-width: 900px; margin: 32px auto; padding: 0 16px; background: #0b0d10; color: #e9edf1; }
-    h1 { font-size: 22px; margin-bottom: 6px; }
-    p { color: #aeb8c2; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
-    button, input::file-selector-button { font: inherit; padding: 9px 12px; border: 1px solid #39424c; border-radius: 7px; background: #171b20; color: #eef3f7; cursor: pointer; }
-    button:disabled { opacity: .4; cursor: default; }
-    input[type=file] { width: 100%; }
-    progress { width: 100%; height: 18px; }
-    pre { min-height: 330px; max-height: 58vh; overflow: auto; padding: 14px; border: 1px solid #2c343d; border-radius: 8px; background: #050607; white-space: pre-wrap; word-break: break-word; }
-    .ok { color: #a7f3a7; }
-    .warn { color: #ffd27a; }
+    :root {
+      color-scheme: dark;
+      --bg: #16191c;
+      --top: #202428;
+      --panel: #22262a;
+      --panel-2: #1b1f22;
+      --terminal: #101214;
+      --border: #343a40;
+      --border-strong: #474e55;
+      --text: #e4e7ea;
+      --muted: #969da4;
+      --accent: #22b8cf;
+      --accent-hover: #36c7dc;
+      --ok: #63c174;
+      --warn: #d7a94d;
+      --danger: #df6b69;
+      --radius: 3px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { min-height: 100%; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    button, input { font: inherit; }
+
+    .topbar {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 0 24px;
+      background: var(--top);
+      border-bottom: 1px solid #090a0b;
+    }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 18px;
+      min-width: 0;
+    }
+
+    .logo {
+      font-size: 28px;
+      line-height: 1;
+      font-weight: 800;
+      font-style: italic;
+      letter-spacing: -1.4px;
+      white-space: nowrap;
+    }
+
+    .logo .c5 { color: #f1f3f4; }
+    .logo .vrx { color: var(--accent); }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .connection {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      color: #c9ced3;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .connection-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #6e7479;
+    }
+
+    .connection.connected .connection-dot { background: var(--ok); }
+
+    .app {
+      width: min(1040px, calc(100% - 32px));
+      margin: 26px auto 36px;
+    }
+
+    .page-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      margin: 0 0 12px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .page-note {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+    }
+
+    .panel-header {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 14px;
+      background: var(--panel-2);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .panel-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .035em;
+    }
+
+    .panel-body { padding: 16px; }
+
+    .field-label {
+      display: block;
+      margin: 0 0 7px;
+      color: #c4c9ce;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .file-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+
+    .file-display {
+      min-width: 0;
+      height: 38px;
+      display: flex;
+      align-items: center;
+      padding: 0 11px;
+      background: #171a1d;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      color: #d9dde0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    #firmware { position: absolute; opacity: 0; pointer-events: none; }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    button, .file-button {
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 13px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: #2b3035;
+      color: #e1e4e7;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+      transition: background .12s ease, border-color .12s ease;
+    }
+
+    button:hover:not(:disabled), .file-button:hover {
+      background: #343a40;
+      border-color: #5b646c;
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #081014;
+    }
+
+    button.primary:hover:not(:disabled) {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    button:disabled {
+      opacity: .38;
+      cursor: default;
+    }
+
+    .progress-section {
+      display: grid;
+      grid-template-columns: 1fr 88px;
+      gap: 12px;
+      align-items: end;
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .progress-wrap {
+      height: 9px;
+      overflow: hidden;
+      background: #111315;
+      border: 1px solid #3d444a;
+      border-radius: 2px;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+      transition: width .08s linear;
+    }
+
+    .progress-value {
+      color: #bcc2c7;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 12px;
+      min-height: 44px;
+      margin-top: 14px;
+      padding: 0 12px;
+      background: #1a1d20;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border: 1px solid #4a5157;
+      border-radius: 2px;
+      color: #cbd0d4;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .status-badge.ok { border-color: #3c7447; color: #8fd59b; }
+    .status-badge.busy { border-color: #497f89; color: #7ed6e4; }
+    .status-badge.error { border-color: #8b4746; color: #f09a98; }
+
+    .status-text {
+      min-width: 0;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .terminal-actions {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .terminal-actions button {
+      min-height: 29px;
+      padding: 0 10px;
+      font-size: 12px;
+    }
+
+    pre {
+      min-height: 360px;
+      max-height: 58vh;
+      margin: 0;
+      overflow: auto;
+      padding: 14px;
+      background: var(--terminal);
+      color: #cfd4d8;
+      border: 0;
+      border-radius: 0 0 var(--radius) var(--radius);
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      color: #737b82;
+      font-size: 11px;
+      padding: 2px 1px 0;
+    }
+
+    .footer strong { color: #9ba2a8; font-weight: 600; }
+
+    @media (max-width: 720px) {
+      .topbar { height: auto; min-height: 64px; padding: 14px 16px; align-items: flex-start; }
+      .brand { flex-direction: column; gap: 4px; }
+      .subtitle { white-space: normal; }
+      .app { width: min(100% - 20px, 1040px); margin-top: 18px; }
+      .page-title { align-items: flex-start; flex-direction: column; gap: 5px; }
+      .file-row { grid-template-columns: 1fr; }
+      .file-button { width: 100%; }
+      .button-row > button { flex: 1 1 180px; }
+      .footer { flex-direction: column; align-items: flex-start; }
+    }
   </style>
 </head>
 <body>
-  <h1>C5VRX-2 flasher</h1>
-  <p>One merged ESP32-C5 image at <code>0x0</code>. Chrome/Edge + Web Serial.</p>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-label="C5VRX"><span class="c5">C5</span><span class="vrx">VRX</span></div>
+      <div class="subtitle">ESP32-C5 Analog FPV Receiver</div>
+    </div>
+    <div id="connection" class="connection">
+      <span class="connection-dot"></span>
+      <span id="connectionText">Disconnected</span>
+    </div>
+  </header>
 
-  <input id="firmware" type="file" accept=".bin,application/octet-stream">
-  <div class="row">
-    <button id="connect">Connect bootloader</button>
-    <button id="flash" disabled>Flash merged .bin</button>
-    <button id="terminal">Open 115200 terminal</button>
-    <button id="stopTerminal" disabled>Stop terminal</button>
-    <button id="clear">Clear</button>
-  </div>
-  <progress id="progress" max="100" value="0"></progress>
-  <pre id="log"></pre>
+  <main class="app">
+    <div class="page-title">
+      <h1>Firmware Flasher</h1>
+      <div class="page-note">Merged ESP32-C5 image · flash address 0x00000000 · Web Serial</div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Firmware</div>
+      </div>
+      <div class="panel-body">
+        <label class="field-label" for="firmware">Firmware file</label>
+        <div class="file-row">
+          <div id="fileDisplay" class="file-display">No firmware selected</div>
+          <label class="file-button" for="firmware">Browse…</label>
+          <input id="firmware" type="file" accept=".bin,application/octet-stream">
+        </div>
+
+        <div class="button-row">
+          <button id="connect">Connect Bootloader</button>
+          <button id="flash" class="primary" disabled>Flash Firmware</button>
+          <button id="terminal">Open Terminal</button>
+          <button id="stopTerminal" disabled>Stop Terminal</button>
+        </div>
+
+        <div class="progress-section">
+          <div>
+            <div class="field-label">Flash progress</div>
+            <div class="progress-wrap"><div id="progressBar" class="progress-bar"></div></div>
+          </div>
+          <div id="progressValue" class="progress-value">0%</div>
+        </div>
+
+        <div class="status-strip">
+          <span id="statusBadge" class="status-badge">Ready</span>
+          <span id="statusText" class="status-text">Select firmware and connect the ESP32-C5 bootloader.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Terminal / Log</div>
+        <div class="terminal-actions">
+          <button id="clear">Clear</button>
+        </div>
+      </div>
+      <pre id="log"></pre>
+    </section>
+
+    <div class="footer">
+      <span><strong>C5VRX-2 Web Flasher</strong></span>
+      <span>Terminal 115200 baud · Flash 460800 baud</span>
+    </div>
+  </main>
 
 <script type="module">
   import { ESPLoader, Transport } from "https://unpkg.com/esptool-js@0.6.1/lib/index.js?module";
 
   const $ = (id) => document.getElementById(id);
   const logEl = $("log");
-  const progress = $("progress");
+  const progressBar = $("progressBar");
+  const progressValue = $("progressValue");
+  const statusBadge = $("statusBadge");
+  const statusText = $("statusText");
+  const connection = $("connection");
+  const connectionText = $("connectionText");
+  const fileDisplay = $("fileDisplay");
+
   let port = null;
   let transport = null;
   let loader = null;
@@ -50,8 +439,31 @@
     logEl.textContent += String(text);
     logEl.scrollTop = logEl.scrollHeight;
   }
+
   function line(text = "") { log(text + "\n"); }
-  function error(err) { line("ERROR: " + (err?.message ?? err)); }
+
+  function setProgress(value) {
+    const percent = Math.max(0, Math.min(100, Number(value) || 0));
+    progressBar.style.width = `${percent}%`;
+    progressValue.textContent = `${Math.round(percent)}%`;
+  }
+
+  function setStatus(kind, label, text) {
+    statusBadge.className = `status-badge${kind ? ` ${kind}` : ""}`;
+    statusBadge.textContent = label;
+    statusText.textContent = text;
+  }
+
+  function setConnected(connected, label = "Connected") {
+    connection.classList.toggle("connected", connected);
+    connectionText.textContent = connected ? label : "Disconnected";
+  }
+
+  function error(err) {
+    const message = err?.message ?? String(err);
+    setStatus("error", "Error", message);
+    line("ERROR: " + message);
+  }
 
   const loaderTerminal = {
     clean() {},
@@ -70,6 +482,7 @@
       try { await port.close(); } catch (_) {}
     }
     $("stopTerminal").disabled = true;
+    setConnected(false);
   }
 
   async function disconnectLoader() {
@@ -79,11 +492,19 @@
     transport = null;
     loader = null;
     $("flash").disabled = true;
+    setConnected(false);
   }
+
+  $("firmware").addEventListener("change", () => {
+    const file = $("firmware").files[0];
+    fileDisplay.textContent = file ? file.name : "No firmware selected";
+    if (file) setStatus("", "Ready", `${file.name} selected. Connect bootloader to continue.`);
+  });
 
   $("connect").onclick = async () => {
     try {
-      if (!("serial" in navigator)) throw new Error("Web Serial is unavailable. Use Chrome or Edge over HTTPS/localhost.");
+      if (!("serial" in navigator)) throw new Error("Web Serial unavailable. Use Chrome or Edge over HTTPS/localhost.");
+      setStatus("busy", "Connecting", "Opening ESP32-C5 bootloader…");
       await stopTerminal();
       await disconnectLoader();
       port = await navigator.serial.requestPort();
@@ -94,9 +515,11 @@
         terminal: loaderTerminal,
         debugLogging: false,
       });
-      line("Connecting...");
+      line("Connecting bootloader...");
       const chip = await loader.main();
       line(`Connected: ${chip}`);
+      setConnected(true, chip || "ESP32-C5");
+      setStatus("ok", "Connected", `${chip || "ESP32-C5"} bootloader ready.`);
       $("flash").disabled = false;
     } catch (e) {
       error(e);
@@ -113,8 +536,9 @@
       const data = new Uint8Array(await file.arrayBuffer());
       if (data.length < 4096) throw new Error("File is too small to be a merged firmware image.");
 
+      setProgress(0);
+      setStatus("busy", "Flashing", `${file.name} → 0x00000000`);
       line(`Flashing ${file.name} (${data.length} bytes) at 0x00000000...`);
-      progress.value = 0;
       await loader.writeFlash({
         fileArray: [{ data, address: 0x0 }],
         flashMode: "keep",
@@ -123,13 +547,15 @@
         eraseAll: false,
         compress: true,
         reportProgress: (_fileIndex, written, total) => {
-          progress.value = total ? (written * 100 / total) : 0;
+          setProgress(total ? written * 100 / total : 0);
         },
       });
-      progress.value = 100;
+      setProgress(100);
+      setStatus("ok", "Complete", "Flash finished. Resetting ESP32-C5…");
       line("Flash complete. Hard reset...");
       await loader.after("hard_reset");
       await disconnectLoader();
+      setStatus("ok", "Complete", "Reset complete. Open Terminal to view boot/runtime output.");
       line("Reset done. Open Terminal to view boot/runtime output.");
     } catch (e) {
       error(e);
@@ -144,6 +570,8 @@
       await port.open({ baudRate: 115200 });
       terminalRunning = true;
       $("stopTerminal").disabled = false;
+      setConnected(true, "Terminal");
+      setStatus("ok", "Terminal", "Serial terminal open at 115200 baud.");
       line("--- terminal 115200 ---");
       const decoder = new TextDecoder();
       terminalReader = port.readable.getReader();
@@ -161,16 +589,25 @@
         terminalReader = null;
       }
       $("stopTerminal").disabled = true;
+      setConnected(false);
     }
   };
 
-  $("stopTerminal").onclick = stopTerminal;
+  $("stopTerminal").onclick = async () => {
+    await stopTerminal();
+    setStatus("", "Ready", "Terminal stopped.");
+    line("--- terminal stopped ---");
+  };
+
   $("clear").onclick = () => { logEl.textContent = ""; };
 
+  setProgress(0);
   if (!("serial" in navigator)) {
+    setStatus("error", "Unsupported", "Web Serial unavailable. Use Chrome or Edge over HTTPS/localhost.");
     line("Web Serial unavailable: use Chrome/Edge on HTTPS or localhost.");
   } else {
-    line("Ready. Select merged firmware, connect bootloader, flash, then open terminal.");
+    setStatus("", "Ready", "Select firmware and connect the ESP32-C5 bootloader.");
+    line("C5VRX-2 Web Flasher ready.");
   }
 </script>
 </body>
