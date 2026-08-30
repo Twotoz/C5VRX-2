@@ -28,19 +28,28 @@ extern const uint8_t c5vrx2_lp_bin_end[]
 #define STATE_STOPPED  4u
 
 static const char *TAG = "c5vrx2_rt";
-static portMUX_TYPE s_park_mux = portMUX_INITIALIZER_UNLOCKED;
 
-static bool IRAM_ATTR park_hp_until_terminal(void)
+static bool IRAM_ATTR __attribute__((noinline)) park_hp_until_terminal(void)
 {
+    const uint32_t mie = 0x8u;
+    uint32_t saved_mstatus;
     bool saw_running = false;
-    portENTER_CRITICAL(&s_park_mux);
+
+    /* FreeRTOS critical sections leave higher-level CLIC interrupts eligible.
+     * Once LP grants the RF writer HP SRAM, even one such ISR can touch flash,
+     * a driver object or a reassigned SRAM bank. Mask MSTATUS.MIE directly and
+     * make no calls until LP has restored ownership on a terminal state. */
+    __asm__ __volatile__("csrrc %0, mstatus, %1"
+                         : "=r"(saved_mstatus) : "r"(mie) : "memory");
     ulp_c5vrx2_command = CMD_CONTINUOUS;
     for (;;) {
         const uint32_t state = ulp_c5vrx2_state;
         if (state == STATE_RUNNING) saw_running = true;
         if (state == STATE_ERROR || state == STATE_STOPPED) break;
     }
-    portEXIT_CRITICAL(&s_park_mux);
+    if ((saved_mstatus & mie) != 0u) {
+        __asm__ __volatile__("csrs mstatus, %0" :: "r"(mie) : "memory");
+    }
     return saw_running;
 }
 
