@@ -4,6 +4,7 @@ idf_component_register(
         "iq_decode.c"
         "wifi5.c"
         "rf_dump.c"
+        "regdma_rearm.c"
         "wbfm_direct.c"
         "parlio_direct.c"
         "realtime.c"
@@ -18,6 +19,7 @@ idf_component_register(
         esp_driver_bitscrambler
         heap
         esp_hal_security
+        esp_hal_pmu
         ulp
 )
 
