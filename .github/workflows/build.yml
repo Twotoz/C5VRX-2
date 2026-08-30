@@ -1,0 +1,17 @@
+name: C5VRX-2 realtime build
+
+on:
+  push:
+    branches: [realtime-iq-parlio]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select ESP32-C5
+        run: idf.py set-target esp32c5
+      - name: Build realtime firmware
+        run: idf.py build
