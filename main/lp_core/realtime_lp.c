@@ -5,6 +5,12 @@
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define DUMP_CTRL        0x600a9004u
 #define DUMP_PTR         0x600a9008u
+#define DUMP_FORMAT      0x600a9018u
+#define FE_PATH          0x600a20b4u
+#define FE_ENABLE        0x600a0800u
+#define SOURCE_CTRL      0x600a08ccu
+#define SOURCE_MUX       0x600a70b8u
+#define MODEM_CLOCK      0x600a9c04u
 #define HP_SRAM_USAGE    0x60095004u
 #define PARLIO_TX_CLOCK  0x600960b4u
 
@@ -13,6 +19,7 @@
 #define CTRL_DONE        0x00040000u
 #define PTR_MASK         0x00003fffu
 #define MODE0_SELECTOR   0x01e00000u
+#define DUMP_WORDS       16384u
 #define PARLIO_CLK_EN    0x00040000u
 
 #define CMD_NONE       0u
@@ -67,6 +74,9 @@ volatile uint32_t c5vrx2_fail_control;
 volatile uint32_t c5vrx2_fail_pointer_mode;
 volatile uint32_t c5vrx2_start_control;
 volatile uint32_t c5vrx2_arm_pointer_mode;
+volatile uint32_t c5vrx2_started_pointer_mode;
+volatile uint32_t c5vrx2_arm_format;
+volatile uint32_t c5vrx2_started_format;
 
 static inline void fence_io(void)
 {
@@ -95,6 +105,41 @@ static inline uint32_t pointer(void)
     return pointer_mode() & PTR_MASK;
 }
 
+/* Exact automatic-gain mode-0 configure subset recovered from the pinned C5
+ * v6.0.2 adctrig path.  The vendor path repeats this before every finite arm;
+ * this diagnostic does likewise so the next hardware run can distinguish a
+ * one-shot configure latch from the control-only rearm sequence. */
+static inline uint32_t configure_mode0_arm(void)
+{
+    REG32(SOURCE_CTRL) &= 0xff87ffffu;
+    REG32(SOURCE_MUX) = (REG32(SOURCE_MUX) & 0xfffffff8u) | 1u;
+    REG32(MODEM_CLOCK) = UINT32_MAX;
+    REG32(FE_ENABLE) |= 4u;
+
+    uint32_t c = REG32(DUMP_CTRL);
+    c = (c & ~0x0001ffffu) | DUMP_WORDS;
+    c &= ~(CTRL_ENABLE | CTRL_START | CTRL_DONE | 0x00320000u);
+    REG32(DUMP_CTRL) = c;
+
+    uint32_t v = REG32(DUMP_FORMAT);
+    v = (v & 0xff03ffffu) | 0x006c0000u;
+    REG32(DUMP_FORMAT) = v;
+    v = REG32(DUMP_FORMAT);
+    v = (v & 0xfffc0fffu) | 0x0001a000u;
+    REG32(DUMP_FORMAT) = v;
+    v = REG32(DUMP_FORMAT);
+    v = (v & 0xfffff03fu) | 0x00000640u;
+    REG32(DUMP_FORMAT) = v;
+    v = REG32(DUMP_FORMAT);
+    v = (v & 0xffffffc0u) | 0x18u;
+    REG32(DUMP_FORMAT) = v | 0x01000000u;
+
+    REG32(FE_PATH) &= ~1u;
+    REG32(DUMP_PTR) |= MODE0_SELECTOR;
+    fence_io();
+    return c;
+}
+
 /* Disable from a clean control image.  DONE is an observed status bit, but
  * carrying its sampled 1 back into every RMW write made the physical writer
  * intermittently remain terminal at 0x80044000. */
@@ -111,12 +156,9 @@ static inline bool arm_writer_direct(void)
             return false;
     }
 
-    /* Mode-0 selector bit 24 is consumed/cleared at each terminal boundary.
-     * Without reasserting the full recovered selector, ENABLE+START resets the
-     * pointer but the next one-shot receives no source samples. */
-    REG32(DUMP_PTR) |= MODE0_SELECTOR;
-    fence_io();
+    c = configure_mode0_arm();
     c5vrx2_arm_pointer_mode = REG32(DUMP_PTR);
+    c5vrx2_arm_format = REG32(DUMP_FORMAT);
 
     c |= CTRL_ENABLE;
     REG32(DUMP_CTRL) = c;
@@ -124,6 +166,8 @@ static inline bool arm_writer_direct(void)
     REG32(DUMP_CTRL) = c;
     fence_io();
     c5vrx2_start_control = REG32(DUMP_CTRL);
+    c5vrx2_started_pointer_mode = REG32(DUMP_PTR);
+    c5vrx2_started_format = REG32(DUMP_FORMAT);
     return (c5vrx2_start_control & CTRL_ENABLE) != 0u &&
            (c5vrx2_start_control & CTRL_DONE) == 0u;
 }
@@ -172,6 +216,9 @@ static void run_continuous(void)
     c5vrx2_fail_pointer_mode = 0u;
     c5vrx2_start_control = 0u;
     c5vrx2_arm_pointer_mode = 0u;
+    c5vrx2_started_pointer_mode = 0u;
+    c5vrx2_arm_format = 0u;
+    c5vrx2_started_format = 0u;
     c5vrx2_stage = 1u;
 
     c5vrx2_saved_ownership = REG32(HP_SRAM_USAGE);

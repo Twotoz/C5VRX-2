@@ -114,7 +114,7 @@ esp_err_t c5vrx2_realtime_start(void)
      * WebSerial terminal opened after re-enumeration can still collect it. */
     for (unsigned report = 1u; report <= 30u; ++report) {
         ESP_LOGE(TAG,
-                 "CADENCE MEASURED report=%u/30 state=%u blocks=%u rearms=%u failures=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u source_hz=%u matched_parlio_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x arm_ctrl=0x%08x arm_ptr_mode=0x%08x",
+                 "CADENCE MEASURED report=%u/30 state=%u blocks=%u rearms=%u failures=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u source_hz=%u matched_parlio_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x arm_ctrl=0x%08x arm_ptr_pre=0x%08x arm_ptr_post=0x%08x arm_fmt_pre=0x%08x arm_fmt_post=0x%08x",
                  report,
                  (unsigned)ulp_c5vrx2_state,
                  (unsigned)blocks,
@@ -134,7 +134,10 @@ esp_err_t c5vrx2_realtime_start(void)
                  (unsigned)ulp_c5vrx2_fail_control,
                  (unsigned)ulp_c5vrx2_fail_pointer_mode,
                  (unsigned)ulp_c5vrx2_start_control,
-                 (unsigned)ulp_c5vrx2_arm_pointer_mode);
+                 (unsigned)ulp_c5vrx2_arm_pointer_mode,
+                 (unsigned)ulp_c5vrx2_started_pointer_mode,
+                 (unsigned)ulp_c5vrx2_arm_format,
+                 (unsigned)ulp_c5vrx2_started_format);
         if (report != 30u) vTaskDelay(pdMS_TO_TICKS(1000u));
     }
     ESP_LOGE(TAG,
