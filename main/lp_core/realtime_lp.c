@@ -43,8 +43,6 @@
 #define STATE_STOPPED  4u
 
 #define TELEMETRY_MAGIC 0x43355232u /* "C5R2" */
-#define DIAGNOSTIC_BLOCK_LIMIT 10000u
-#define DIAGNOSTIC_WINDOW_US 30000000u
 #define WRITER_STALL_US 250000u
 #define REARM_ADVANCE_US 250000u
 
@@ -314,8 +312,6 @@ static void run_continuous(void)
         const uint32_t control = REG32(DUMP_CTRL);
 
         c5vrx2_run_cycles = now - run_started;
-        if (c5vrx2_run_cycles >= cycles_for_us(DIAGNOSTIC_WINDOW_US))
-            goto stopped;
 
         if ((control & CTRL_DONE) != 0u) c5vrx2_done_seen = 1u;
         if (current > previous) {
@@ -395,8 +391,6 @@ static void run_continuous(void)
                     goto fail;
                 }
             }
-
-            if (c5vrx2_blocks >= DIAGNOSTIC_BLOCK_LIMIT) goto stopped;
 
             /* `now` was sampled before the synchronous REGDMA rearm.  Do not
              * feed that stale timestamp into the inactivity detector below:
