@@ -121,6 +121,7 @@ void __attribute__((noreturn)) ulp_lp_core_panic_handler(RvExcFrame *frame,
 
 static void run_continuous(void)
 {
+    uint32_t final_state = STATE_ERROR;
     c5vrx2_runs++;
     c5vrx2_rearms = 0u;
     c5vrx2_rearm_failures = 0u;
@@ -220,10 +221,10 @@ static void run_continuous(void)
 fail:
     c5vrx2_rearm_failures++;
 fail_no_increment:
-    c5vrx2_state = STATE_ERROR;
+    final_state = STATE_ERROR;
     goto restore;
 stopped:
-    c5vrx2_state = STATE_STOPPED;
+    final_state = STATE_STOPPED;
 restore:
     REG32(PARLIO_TX_CLOCK) &= ~PARLIO_CLK_EN;
     REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
@@ -232,6 +233,8 @@ restore:
     fence_io();
     c5vrx2_stage = 0u;
     c5vrx2_command = CMD_NONE;
+    fence_io();
+    c5vrx2_state = final_state;
 }
 
 int main(void)
