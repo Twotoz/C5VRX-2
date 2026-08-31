@@ -101,18 +101,21 @@ esp_err_t c5vrx2_realtime_start(void)
         ? ulp_c5vrx2_fill_cycles_total / blocks : 0u;
     const uint32_t gap_avg = ulp_c5vrx2_rearms != 0u
         ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u;
-    const uint32_t wall_source_hz = fill_avg != 0u
+    const uint32_t average_block_source_hz = fill_avg != 0u
         ? (uint32_t)((16384ull * 48000000ull) / fill_avg) : 0u;
     const uint32_t active_source_hz = blocks != 0u &&
                                       ulp_c5vrx2_fill_cycles_min != 0u
         ? (uint32_t)((16384ull * 48000000ull) /
                      ulp_c5vrx2_fill_cycles_min) : 0u;
+    const uint32_t effective_source_hz = ulp_c5vrx2_run_cycles != 0u
+        ? (uint32_t)(((uint64_t)ulp_c5vrx2_observed_words * 48000000ull) /
+                     ulp_c5vrx2_run_cycles) : 0u;
     /* The native USB endpoint is intentionally unavailable while HP is
      * parked. Repeat the bounded result after SRAM ownership is restored so a
      * WebSerial terminal opened after re-enumeration can still collect it. */
     for (unsigned report = 1u; report <= 30u; ++report) {
         ESP_LOGE(TAG,
-                 "PRODUCER ACTIVITY report=%u/30 state=%u blocks=%u rearms=%u failures=%u words=%u ptr=%u changes=%u pauses=%u resumes=%u pause_active=%u pause_last=%u pause_max=%u run_cyc=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u reset_cyc=%u reset_ptr=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u advance_ptr=%u active_source_hz=%u wall_source_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x start_ctrl=0x%08x pau_conf=0x%08x pau_raw=0x%08x pau_link=0x%08x pau_peri=0x%08x pau_mem=0x%08x pau_timeout=%u pau_flow=%u",
+                 "PRODUCER ACTIVITY report=%u/30 state=%u blocks=%u rearms=%u failures=%u words=%u ptr=%u changes=%u pauses=%u resumes=%u pause_active=%u pause_last=%u pause_max=%u run_cyc=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u reset_cyc=%u reset_ptr=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u advance_ptr=%u active_source_hz=%u average_block_source_hz=%u effective_source_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x start_ctrl=0x%08x pau_conf=0x%08x pau_raw=0x%08x pau_link=0x%08x pau_peri=0x%08x pau_mem=0x%08x pau_timeout=%u pau_flow=%u",
                  report,
                  (unsigned)ulp_c5vrx2_state,
                  (unsigned)blocks,
@@ -139,7 +142,8 @@ esp_err_t c5vrx2_realtime_start(void)
                  (unsigned)ulp_c5vrx2_gap_cycles_max,
                  (unsigned)ulp_c5vrx2_advance_pointer,
                  (unsigned)active_source_hz,
-                 (unsigned)wall_source_hz,
+                 (unsigned)average_block_source_hz,
+                 (unsigned)effective_source_hz,
                  (unsigned)ulp_c5vrx2_fail_reason,
                  (unsigned)ulp_c5vrx2_fail_control,
                  (unsigned)ulp_c5vrx2_fail_pointer_mode,

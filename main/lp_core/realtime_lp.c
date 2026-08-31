@@ -389,6 +389,12 @@ static void run_continuous(void)
             }
 
             if (c5vrx2_blocks >= DIAGNOSTIC_BLOCK_LIMIT) goto stopped;
+
+            /* `now` was sampled before the synchronous REGDMA rearm.  Do not
+             * feed that stale timestamp into the inactivity detector below:
+             * restarted_at is newer and unsigned subtraction would otherwise
+             * manufacture one pause/resume pair at every block boundary. */
+            continue;
         }
 
         /* Mode 0 is RF-activity dependent. Keep the writer armed for the full
