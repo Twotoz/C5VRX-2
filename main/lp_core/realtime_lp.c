@@ -13,11 +13,13 @@
 #define PAU_INT_RAW      0x6009301cu
 #define PAU_INT_CLR      0x60093020u
 #define HP_SRAM_USAGE    0x60095004u
+#define PARLIO_TX_CLOCK  0x600960b4u
 
 #define CTRL_ENABLE      0x80000000u
 #define CTRL_START       0x00080000u
 #define CTRL_DONE        0x00040000u
 #define PTR_MASK         0x00003fffu
+#define PARLIO_CLK_EN    0x00040000u
 
 #define PAU_START        0x00000008u
 #define PAU_TO_MEM       0x00000010u
@@ -211,6 +213,7 @@ void __attribute__((noreturn)) ulp_lp_core_panic_handler(RvExcFrame *frame,
     c5vrx2_fault_cause = (uint32_t)cause;
     c5vrx2_fault_address = (uint32_t)frame->mtval;
     c5vrx2_fault_pc = (uint32_t)frame->mepc;
+    REG32(PARLIO_TX_CLOCK) &= ~PARLIO_CLK_EN;
     REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
     fence_io();
     if (c5vrx2_stage >= 2u) {
@@ -291,6 +294,11 @@ static void run_continuous(void)
         }
     }
 
+    /* HP prepared a cyclic RF SRAM -> BitScrambler -> PARLIO transaction and
+     * left it backpressured. Start its 20 MHz clock only after half a capture
+     * block is real, giving the consumer its initial producer lead. */
+    REG32(PARLIO_TX_CLOCK) |= PARLIO_CLK_EN;
+    fence_io();
     c5vrx2_state = STATE_RUNNING;
     c5vrx2_stage = 4u;
 
@@ -425,6 +433,7 @@ stopped:
     }
     final_state = STATE_STOPPED;
 restore:
+    REG32(PARLIO_TX_CLOCK) &= ~PARLIO_CLK_EN;
     REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
     fence_io();
     REG32(HP_SRAM_USAGE) = c5vrx2_saved_ownership;

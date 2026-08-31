@@ -10,6 +10,7 @@
 #include "ulp_lp_core.h"
 
 #include "c5vrx2_lp.h"
+#include "parlio_direct.h"
 #include "regdma_rearm.h"
 
 /* ulp_embed_binary() exposes the LP image through linker symbols, matching the
@@ -77,7 +78,9 @@ esp_err_t c5vrx2_realtime_start(void)
     const uint64_t lp_rw =
         BIT64(APM_TEE_HP_PERIPH_MODEM) |
         BIT64(APM_TEE_HP_PERIPH_REGDMA) |
-        BIT64(APM_TEE_HP_PERIPH_SYSTEM_REG);
+        BIT64(APM_TEE_HP_PERIPH_SYSTEM_REG) |
+        BIT64(APM_TEE_HP_PERIPH_PCR_REG) |
+        BIT64(APM_TEE_HP_PERIPH_PARL_IO);
     apm_hal_set_master_sec_mode(BIT(APM_MASTER_LPCORE) |
                                 BIT(APM_MASTER_REGDMA),
                                 APM_SEC_MODE_REE0);
@@ -89,12 +92,20 @@ esp_err_t c5vrx2_realtime_start(void)
     err = c5vrx2_regdma_arm(ulp_c5vrx2_regdma_link_root);
     if (err != ESP_OK) return err;
 
+    /* Mount the cyclic RF-SRAM -> BitScrambler -> PARLIO transaction while HP
+     * still owns the SRAM. Its source clock stays paused until LP has acquired
+     * a half-block of real IQ lead. */
+    err = c5vrx2_parlio_direct_prepare();
+    if (err != ESP_OK) return err;
+
     ESP_LOGW(TAG,
-             "PRODUCER-ONLY ARM: A1 IQ -> LP-triggered REGDMA 16K rearm; BitScrambler/PARLIO disabled; HP parked");
+             "AV TEST ARM: A1 IQ -> REGDMA 16K rearm -> donor-scale phase6 delta -> 20MS/s PARLIO; HP parked");
 
     /* Once LP lends 0x40830000..0x4083ffff to MAC dump, HP must not run normal
      * scheduler/interrupt code. Healthy realtime service stays parked. */
     const bool ran = park_hp_until_terminal();
+
+    c5vrx2_parlio_direct_destroy();
 
     const uint32_t blocks = ulp_c5vrx2_blocks;
     const uint32_t fill_avg = blocks != 0u

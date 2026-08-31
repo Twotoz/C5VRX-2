@@ -13,9 +13,7 @@ BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_direct6_4to1_program,
 
 #define LUT_WORDS 1024u
 #define PI_F 3.14159265358979323846f
-#define CVBS_ZERO_CODE 20u
-#define CVBS_GAIN_SHIFT 1u
-#define PHASE_ACCUMULATOR_BIAS (CVBS_ZERO_CODE << CVBS_GAIN_SHIFT)
+#define CVBS_ZERO_CODE 15u
 
 static float coarse_center(unsigned code5)
 {
@@ -23,23 +21,20 @@ static float coarse_center(unsigned code5)
     return (float)signed5 * 32.0f + 15.5f;
 }
 
-static void build_phase8_lut(uint16_t lut[LUT_WORDS])
+static void build_phase6_lut(uint16_t lut[LUT_WORDS])
 {
     for (unsigned i5 = 0; i5 < 32u; ++i5) {
         for (unsigned q5 = 0; q5 < 32u; ++q5) {
             float p = atan2f(coarse_center(q5), coarse_center(i5));
             if (p < 0.0f) p += 2.0f * PI_F;
             const uint8_t phase =
-                (uint8_t)lrintf(p * (256.0f / (2.0f * PI_F)));
-            /* Preserve the measured VTX polarity: its H-sync interval is a
-             * negative current-minus-previous phase delta.  The accumulator
-             * therefore computes bias + current - previous.  Emitting bits
-             * 1..6 maps phase8 to a conservative 2x phase6 gain: the saved
-             * XIAO captures predict sync around code 4, porch around 12 and
-             * active video around 22..32 instead of a nearly black 7..21. */
+                (uint8_t)lrintf(p * (64.0f / (2.0f * PI_F))) & 0x3fu;
+            /* Keep the first AV integration on the donor-scale modulo-64
+             * discriminator: bias + current - previous. Polarity and gain
+             * tuning remain deliberately separate from producer validation. */
             lut[(i5 << 5) | q5] =
                 (uint16_t)phase |
-                ((uint16_t)(uint8_t)(PHASE_ACCUMULATOR_BIAS - phase) << 8);
+                ((uint16_t)((CVBS_ZERO_CODE - phase) & 0x3fu) << 8);
         }
     }
 }
@@ -51,7 +46,7 @@ esp_err_t c5vrx2_wbfm_direct_create(bitscrambler_handle_t *out)
     uint16_t *lut = heap_caps_malloc(LUT_WORDS * sizeof(uint16_t),
                                      MALLOC_CAP_INTERNAL);
     if (!lut) return ESP_ERR_NO_MEM;
-    build_phase8_lut(lut);
+    build_phase6_lut(lut);
 
     const bitscrambler_config_t cfg = {
         .dir = BITSCRAMBLER_DIR_TX,

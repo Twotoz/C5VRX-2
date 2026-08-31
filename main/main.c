@@ -41,7 +41,7 @@ void app_main(void)
     }
 
     ESP_LOGW(TAG,
-             "IQ producer prepared: 16384-word mode0, VTX-independent; starting direct LP rearm + PARLIO");
+             "IQ producer prepared: 16384-word mode0; starting REGDMA rearm + phase-delta PARLIO AV test");
     err = c5vrx2_realtime_start();
     ESP_LOGE(TAG, "realtime service returned unexpectedly: %s", esp_err_to_name(err));
 }
