@@ -10,7 +10,7 @@
 #include "ulp_lp_core.h"
 
 #include "c5vrx2_lp.h"
-#include "parlio_direct.h"
+#include "regdma_rearm.h"
 
 /* ulp_embed_binary() exposes the LP image through linker symbols, matching the
  * proven C5VRX LP-core donor. The generated c5vrx2_lp.h only declares the LP
@@ -71,34 +71,31 @@ esp_err_t c5vrx2_realtime_start(void)
         vTaskDelay(1);
     if (ulp_c5vrx2_state != STATE_READY) return ESP_ERR_TIMEOUT;
 
-    /* The LP core directly executes the writer rearm sequence. */
+    /* LP detects the physical boundary and starts PAU. REGDMA performs the
+     * four MODEM writes, so both independent masters need the audited REE0
+     * access installed after ulp_lp_core_run() resets LP's identity. */
     const uint64_t lp_rw =
         BIT64(APM_TEE_HP_PERIPH_MODEM) |
-        BIT64(APM_TEE_HP_PERIPH_SYSTEM_REG) |
-        BIT64(APM_TEE_HP_PERIPH_PCR_REG) |
-        BIT64(APM_TEE_HP_PERIPH_PARL_IO);
-    apm_hal_set_master_sec_mode(BIT(APM_MASTER_LPCORE), APM_SEC_MODE_REE0);
+        BIT64(APM_TEE_HP_PERIPH_REGDMA) |
+        BIT64(APM_TEE_HP_PERIPH_SYSTEM_REG);
+    apm_hal_set_master_sec_mode(BIT(APM_MASTER_LPCORE) |
+                                BIT(APM_MASTER_REGDMA),
+                                APM_SEC_MODE_REE0);
     apm_hal_tee_set_peri_access(APM_TEE_CTRL_HP, lp_rw,
                                 APM_SEC_MODE_REE0, APM_PERM_R | APM_PERM_W);
 
-    /* Mount the looping RF-SRAM -> BitScrambler -> PARLIO transaction while
-     * the RF window is still CPU-owned. Its source clock remains paused. */
-    err = c5vrx2_parlio_direct_prepare();
+    /* ESP32-C5 has one always-on REGDMA entry address. Point it at the donor's
+     * four masked WRITE nodes in LP SRAM before HP SRAM changes ownership. */
+    err = c5vrx2_regdma_arm(ulp_c5vrx2_regdma_link_root);
     if (err != ESP_OK) return err;
 
     ESP_LOGW(TAG,
-             "REALTIME ARM: A1 IQ -> DONE-cleared direct LP 16K rearm -> phase-delta -> 20MS/s PARLIO; HP parked");
+             "PRODUCER-ONLY ARM: A1 IQ -> LP-triggered REGDMA 16K rearm; BitScrambler/PARLIO disabled; HP parked");
 
     /* Once LP lends 0x40830000..0x4083ffff to MAC dump, HP must not run normal
      * scheduler/interrupt code. Healthy realtime service stays parked. */
     const bool ran = park_hp_until_terminal();
 
-    /* FreeRTOS/driver objects may have been touched while their backing SRAM
-     * was lent to the RF writer.  Calling the PARLIO driver's queue-based
-     * teardown here triggered xTaskPriorityDisinherit on the physical XIAO.
-     * The bounded diagnostic never starts a second transaction, so quiesce
-     * hardware directly and keep the allocated objects intact for logging. */
-    c5vrx2_parlio_direct_quiesce();
     const uint32_t blocks = ulp_c5vrx2_blocks;
     const uint32_t fill_avg = blocks != 0u
         ? ulp_c5vrx2_fill_cycles_total / blocks : 0u;
@@ -106,15 +103,12 @@ esp_err_t c5vrx2_realtime_start(void)
         ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u;
     const uint32_t source_hz = fill_avg != 0u
         ? (uint32_t)((16384ull * 48000000ull) / fill_avg) : 0u;
-    const uint32_t matched_parlio_hz = (fill_avg + gap_avg) != 0u
-        ? (uint32_t)((4096ull * 48000000ull) /
-                     (fill_avg + gap_avg)) : 0u;
     /* The native USB endpoint is intentionally unavailable while HP is
      * parked. Repeat the bounded result after SRAM ownership is restored so a
      * WebSerial terminal opened after re-enumeration can still collect it. */
     for (unsigned report = 1u; report <= 30u; ++report) {
         ESP_LOGE(TAG,
-                 "CADENCE MEASURED report=%u/30 state=%u blocks=%u rearms=%u failures=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u source_hz=%u matched_parlio_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x arm_ctrl=0x%08x arm_ptr_pre=0x%08x arm_ptr_post=0x%08x arm_fmt_pre=0x%08x arm_fmt_post=0x%08x",
+                 "PRODUCER REGDMA report=%u/30 state=%u blocks=%u rearms=%u failures=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u reset_cyc=%u reset_ptr=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u advance_ptr=%u source_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x start_ctrl=0x%08x pau_conf=0x%08x pau_raw=0x%08x pau_link=0x%08x pau_peri=0x%08x pau_mem=0x%08x pau_timeout=%u pau_flow=%u",
                  report,
                  (unsigned)ulp_c5vrx2_state,
                  (unsigned)blocks,
@@ -124,20 +118,25 @@ esp_err_t c5vrx2_realtime_start(void)
                  (unsigned)fill_avg,
                  (unsigned)ulp_c5vrx2_fill_cycles_last,
                  (unsigned)ulp_c5vrx2_fill_cycles_max,
+                 (unsigned)ulp_c5vrx2_reset_cycles,
+                 (unsigned)ulp_c5vrx2_reset_pointer,
                  (unsigned)ulp_c5vrx2_gap_cycles_min,
                  (unsigned)gap_avg,
                  (unsigned)ulp_c5vrx2_gap_cycles_last,
                  (unsigned)ulp_c5vrx2_gap_cycles_max,
+                 (unsigned)ulp_c5vrx2_advance_pointer,
                  (unsigned)source_hz,
-                 (unsigned)matched_parlio_hz,
                  (unsigned)ulp_c5vrx2_fail_reason,
                  (unsigned)ulp_c5vrx2_fail_control,
                  (unsigned)ulp_c5vrx2_fail_pointer_mode,
                  (unsigned)ulp_c5vrx2_start_control,
-                 (unsigned)ulp_c5vrx2_arm_pointer_mode,
-                 (unsigned)ulp_c5vrx2_started_pointer_mode,
-                 (unsigned)ulp_c5vrx2_arm_format,
-                 (unsigned)ulp_c5vrx2_started_format);
+                 (unsigned)ulp_c5vrx2_regdma_conf,
+                 (unsigned)ulp_c5vrx2_regdma_int_raw,
+                 (unsigned)ulp_c5vrx2_regdma_current_link,
+                 (unsigned)ulp_c5vrx2_regdma_peri_addr,
+                 (unsigned)ulp_c5vrx2_regdma_mem_addr,
+                 (unsigned)ulp_c5vrx2_regdma_timed_out,
+                 (unsigned)(ulp_c5vrx2_regdma_conf & 0x7u));
         if (report != 30u) vTaskDelay(pdMS_TO_TICKS(1000u));
     }
     ESP_LOGE(TAG,

@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdint.h>
 #include "riscv/rvruntime-frames.h"
 #include "ulp_lp_core_cpu_freq_shared.h"
@@ -5,22 +6,29 @@
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define DUMP_CTRL        0x600a9004u
 #define DUMP_PTR         0x600a9008u
-#define DUMP_FORMAT      0x600a9018u
-#define FE_PATH          0x600a20b4u
-#define FE_ENABLE        0x600a0800u
-#define SOURCE_CTRL      0x600a08ccu
-#define SOURCE_MUX       0x600a70b8u
-#define MODEM_CLOCK      0x600a9c04u
+#define PAU_REGDMA_CONF  0x60093000u
+#define PAU_CURRENT_LINK 0x6009300cu
+#define PAU_PERI_ADDR    0x60093010u
+#define PAU_MEM_ADDR     0x60093014u
+#define PAU_INT_RAW      0x6009301cu
+#define PAU_INT_CLR      0x60093020u
 #define HP_SRAM_USAGE    0x60095004u
-#define PARLIO_TX_CLOCK  0x600960b4u
 
 #define CTRL_ENABLE      0x80000000u
 #define CTRL_START       0x00080000u
 #define CTRL_DONE        0x00040000u
 #define PTR_MASK         0x00003fffu
-#define MODE0_SELECTOR   0x01e00000u
-#define DUMP_WORDS       16384u
-#define PARLIO_CLK_EN    0x00040000u
+
+#define PAU_START        0x00000008u
+#define PAU_TO_MEM       0x00000010u
+#define PAU_LINK_SEL_M   0x000001e0u
+#define PAU_LINK3        0x00000060u
+#define PAU_DONE_RAW     0x00000001u
+#define PAU_ERROR_RAW    0x00000002u
+#define PAU_TIMEOUT_CYCLES 8192u
+
+#define REGDMA_WRITE_HEAD     0x40020000u
+#define REGDMA_WRITE_HEAD_EOF 0xc0020000u
 
 #define CMD_NONE       0u
 #define CMD_CONTINUOUS 1u
@@ -35,13 +43,14 @@
 #define TELEMETRY_MAGIC 0x43355232u /* "C5R2" */
 #define DIAGNOSTIC_BLOCK_LIMIT 256u
 #define WRITER_STALL_US 250000u
-#define REARM_ACK_US 5000u
+#define REARM_ADVANCE_US 250000u
 
 #define FAIL_NONE         0u
 #define FAIL_INITIAL_LEAD 1u
 #define FAIL_WRITER_STALL 2u
-#define FAIL_DISABLE_ACK  3u
-#define FAIL_RESTART_ACK  4u
+#define FAIL_PAU_CHAIN    3u
+#define FAIL_RESTART_RESET 4u
+#define FAIL_RESTART_ADVANCE 5u
 
 volatile uint32_t c5vrx2_command;
 volatile uint32_t c5vrx2_state;
@@ -73,10 +82,17 @@ volatile uint32_t c5vrx2_fail_reason;
 volatile uint32_t c5vrx2_fail_control;
 volatile uint32_t c5vrx2_fail_pointer_mode;
 volatile uint32_t c5vrx2_start_control;
-volatile uint32_t c5vrx2_arm_pointer_mode;
-volatile uint32_t c5vrx2_started_pointer_mode;
-volatile uint32_t c5vrx2_arm_format;
-volatile uint32_t c5vrx2_started_format;
+volatile uint32_t c5vrx2_regdma_link_root;
+volatile uint32_t c5vrx2_regdma_nodes[4][7];
+volatile uint32_t c5vrx2_regdma_conf;
+volatile uint32_t c5vrx2_regdma_int_raw;
+volatile uint32_t c5vrx2_regdma_current_link;
+volatile uint32_t c5vrx2_regdma_peri_addr;
+volatile uint32_t c5vrx2_regdma_mem_addr;
+volatile uint32_t c5vrx2_regdma_timed_out;
+volatile uint32_t c5vrx2_reset_pointer;
+volatile uint32_t c5vrx2_reset_cycles;
+volatile uint32_t c5vrx2_advance_pointer;
 
 static inline void fence_io(void)
 {
@@ -105,71 +121,81 @@ static inline uint32_t pointer(void)
     return pointer_mode() & PTR_MASK;
 }
 
-/* Exact automatic-gain mode-0 configure subset recovered from the pinned C5
- * v6.0.2 adctrig path.  The vendor path repeats this before every finite arm;
- * this diagnostic does likewise so the next hardware run can distinguish a
- * one-shot configure latch from the control-only rearm sequence. */
-static inline uint32_t configure_mode0_arm(void)
+/* The four masked WRITE nodes are the physically proven C5 donor chain.  They
+ * live in LP SRAM because HP SRAM is lent to the RF dump writer while the
+ * chain executes.  Hardware entry addresses point at word 2 (the node head). */
+static void prepare_regdma_chain(void)
 {
-    REG32(SOURCE_CTRL) &= 0xff87ffffu;
-    REG32(SOURCE_MUX) = (REG32(SOURCE_MUX) & 0xfffffff8u) | 1u;
-    REG32(MODEM_CLOCK) = UINT32_MAX;
-    REG32(FE_ENABLE) |= 4u;
-
-    uint32_t c = REG32(DUMP_CTRL);
-    c = (c & ~0x0001ffffu) | DUMP_WORDS;
-    c &= ~(CTRL_ENABLE | CTRL_START | CTRL_DONE | 0x00320000u);
-    REG32(DUMP_CTRL) = c;
-
-    uint32_t v = REG32(DUMP_FORMAT);
-    v = (v & 0xff03ffffu) | 0x006c0000u;
-    REG32(DUMP_FORMAT) = v;
-    v = REG32(DUMP_FORMAT);
-    v = (v & 0xfffc0fffu) | 0x0001a000u;
-    REG32(DUMP_FORMAT) = v;
-    v = REG32(DUMP_FORMAT);
-    v = (v & 0xfffff03fu) | 0x00000640u;
-    REG32(DUMP_FORMAT) = v;
-    v = REG32(DUMP_FORMAT);
-    v = (v & 0xffffffc0u) | 0x18u;
-    REG32(DUMP_FORMAT) = v | 0x01000000u;
-
-    REG32(FE_PATH) &= ~1u;
-    REG32(DUMP_PTR) |= MODE0_SELECTOR;
+    for (uint32_t i = 0u; i < 4u; ++i) {
+        for (uint32_t j = 0u; j < 7u; ++j)
+            c5vrx2_regdma_nodes[i][j] = 0u;
+        c5vrx2_regdma_nodes[i][2] = i == 3u ?
+            REGDMA_WRITE_HEAD_EOF : REGDMA_WRITE_HEAD;
+        c5vrx2_regdma_nodes[i][3] = i == 3u ? 0u :
+            (uint32_t)(uintptr_t)&c5vrx2_regdma_nodes[i + 1u][2];
+        c5vrx2_regdma_nodes[i][4] = DUMP_CTRL;
+    }
+    c5vrx2_regdma_nodes[0][5] = 0u;
+    c5vrx2_regdma_nodes[0][6] = CTRL_ENABLE;
+    c5vrx2_regdma_nodes[1][5] = CTRL_ENABLE;
+    c5vrx2_regdma_nodes[1][6] = CTRL_ENABLE;
+    c5vrx2_regdma_nodes[2][5] = CTRL_START;
+    c5vrx2_regdma_nodes[2][6] = CTRL_START;
+    c5vrx2_regdma_nodes[3][5] = 0u;
+    c5vrx2_regdma_nodes[3][6] = CTRL_START;
+    c5vrx2_regdma_link_root =
+        (uint32_t)(uintptr_t)&c5vrx2_regdma_nodes[0][2];
     fence_io();
-    return c;
 }
 
-/* Disable from a clean control image.  DONE is an observed status bit, but
- * carrying its sampled 1 back into every RMW write made the physical writer
- * intermittently remain terminal at 0x80044000. */
-static inline bool arm_writer_direct(void)
+/* Startup is intentionally direct.  Every realtime boundary below uses PAU
+ * REGDMA, keeping the 48 MHz LP core out of the four timing-sensitive writes. */
+static inline void start_writer_once(void)
 {
     uint32_t c = REG32(DUMP_CTRL) &
                  ~(CTRL_ENABLE | CTRL_START | CTRL_DONE);
     REG32(DUMP_CTRL) = c;
     fence_io();
-
-    const uint32_t disabled_at = cycles();
-    while ((REG32(DUMP_CTRL) & (CTRL_ENABLE | CTRL_DONE)) != 0u) {
-        if ((uint32_t)(cycles() - disabled_at) > cycles_for_us(REARM_ACK_US))
-            return false;
-    }
-
-    c = configure_mode0_arm();
-    c5vrx2_arm_pointer_mode = REG32(DUMP_PTR);
-    c5vrx2_arm_format = REG32(DUMP_FORMAT);
-
     c |= CTRL_ENABLE;
     REG32(DUMP_CTRL) = c;
     REG32(DUMP_CTRL) = c | CTRL_START;
     REG32(DUMP_CTRL) = c;
     fence_io();
     c5vrx2_start_control = REG32(DUMP_CTRL);
-    c5vrx2_started_pointer_mode = REG32(DUMP_PTR);
-    c5vrx2_started_format = REG32(DUMP_FORMAT);
-    return (c5vrx2_start_control & CTRL_ENABLE) != 0u &&
-           (c5vrx2_start_control & CTRL_DONE) == 0u;
+}
+
+static inline bool rearm_regdma_now(void)
+{
+    REG32(PAU_INT_CLR) = PAU_DONE_RAW | PAU_ERROR_RAW;
+    uint32_t conf = REG32(PAU_REGDMA_CONF);
+    conf &= ~(PAU_START | PAU_TO_MEM | PAU_LINK_SEL_M);
+    conf |= PAU_LINK3;
+    REG32(PAU_REGDMA_CONF) = conf;
+    fence_io();
+    REG32(PAU_REGDMA_CONF) = conf | PAU_START;
+    fence_io();
+
+    const uint32_t started = cycles();
+    uint32_t raw;
+    do {
+        raw = REG32(PAU_INT_RAW);
+        if ((raw & PAU_ERROR_RAW) != 0u) break;
+    } while ((raw & PAU_DONE_RAW) == 0u &&
+             (uint32_t)(cycles() - started) < PAU_TIMEOUT_CYCLES);
+
+    c5vrx2_regdma_conf = REG32(PAU_REGDMA_CONF);
+    c5vrx2_regdma_int_raw = raw;
+    c5vrx2_regdma_current_link = REG32(PAU_CURRENT_LINK);
+    c5vrx2_regdma_peri_addr = REG32(PAU_PERI_ADDR);
+    c5vrx2_regdma_mem_addr = REG32(PAU_MEM_ADDR);
+    c5vrx2_regdma_timed_out =
+        (raw & (PAU_DONE_RAW | PAU_ERROR_RAW)) == 0u;
+
+    REG32(PAU_REGDMA_CONF) = conf & ~PAU_LINK_SEL_M;
+    if ((raw & PAU_ERROR_RAW) == 0u) REG32(PAU_INT_CLR) = PAU_DONE_RAW;
+    fence_io();
+    return (raw & PAU_DONE_RAW) != 0u &&
+           (raw & PAU_ERROR_RAW) == 0u;
 }
 
 void __attribute__((noreturn)) ulp_lp_core_panic_handler(RvExcFrame *frame,
@@ -178,7 +204,6 @@ void __attribute__((noreturn)) ulp_lp_core_panic_handler(RvExcFrame *frame,
     c5vrx2_fault_cause = (uint32_t)cause;
     c5vrx2_fault_address = (uint32_t)frame->mtval;
     c5vrx2_fault_pc = (uint32_t)frame->mepc;
-    REG32(PARLIO_TX_CLOCK) &= ~PARLIO_CLK_EN;
     REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
     fence_io();
     if (c5vrx2_stage >= 2u) {
@@ -215,10 +240,15 @@ static void run_continuous(void)
     c5vrx2_fail_control = 0u;
     c5vrx2_fail_pointer_mode = 0u;
     c5vrx2_start_control = 0u;
-    c5vrx2_arm_pointer_mode = 0u;
-    c5vrx2_started_pointer_mode = 0u;
-    c5vrx2_arm_format = 0u;
-    c5vrx2_started_format = 0u;
+    c5vrx2_regdma_conf = 0u;
+    c5vrx2_regdma_int_raw = 0u;
+    c5vrx2_regdma_current_link = 0u;
+    c5vrx2_regdma_peri_addr = 0u;
+    c5vrx2_regdma_mem_addr = 0u;
+    c5vrx2_regdma_timed_out = 0u;
+    c5vrx2_reset_pointer = PTR_MASK;
+    c5vrx2_reset_cycles = 0u;
+    c5vrx2_advance_pointer = PTR_MASK;
     c5vrx2_stage = 1u;
 
     c5vrx2_saved_ownership = REG32(HP_SRAM_USAGE);
@@ -227,10 +257,7 @@ static void run_continuous(void)
     fence_io();
     c5vrx2_stage = 2u;
 
-    if (!arm_writer_direct()) {
-        c5vrx2_fail_reason = FAIL_DISABLE_ACK;
-        goto fail;
-    }
+    start_writer_once();
     c5vrx2_stage = 3u;
 
     uint32_t previous = pointer();
@@ -248,8 +275,6 @@ static void run_continuous(void)
         }
     }
 
-    REG32(PARLIO_TX_CLOCK) |= PARLIO_CLK_EN;
-    fence_io();
     c5vrx2_state = STATE_RUNNING;
     c5vrx2_stage = 4u;
 
@@ -270,6 +295,14 @@ static void run_continuous(void)
 
         if ((control & CTRL_DONE) != 0u && current == PTR_MASK) {
             const uint32_t completed_at = now;
+
+            /* HOT PATH: start the proven four-node hardware chain before any
+             * block statistics or consumer bookkeeping. */
+            if (!rearm_regdma_now()) {
+                c5vrx2_fail_reason = FAIL_PAU_CHAIN;
+                goto fail;
+            }
+
             const uint32_t fill = completed_at - fill_started;
             c5vrx2_fill_cycles_last = fill;
             c5vrx2_fill_cycles_total += fill;
@@ -279,14 +312,20 @@ static void run_continuous(void)
                 c5vrx2_fill_cycles_max = fill;
             c5vrx2_blocks++;
 
-            if (!arm_writer_direct()) {
-                c5vrx2_fail_reason = FAIL_DISABLE_ACK;
-                goto fail;
-            }
-
+            /* A departure from 16383 alone is only controller reset.  Require
+             * a subsequent distinct pointer value before declaring that the
+             * RF producer really wrote samples in the next generation. */
+            uint32_t reset_pointer = PTR_MASK;
+            uint32_t reset_at = 0u;
             for (;;) {
                 const uint32_t restarted = pointer();
-                if (restarted != PTR_MASK) {
+                if (reset_pointer == PTR_MASK && restarted != PTR_MASK) {
+                    reset_pointer = restarted;
+                    reset_at = cycles();
+                    c5vrx2_reset_pointer = reset_pointer;
+                    c5vrx2_reset_cycles = reset_at - completed_at;
+                } else if (reset_pointer != PTR_MASK &&
+                           restarted != reset_pointer) {
                     const uint32_t restarted_at = cycles();
                     const uint32_t gap = restarted_at - completed_at;
                     c5vrx2_gap_cycles_last = gap;
@@ -296,6 +335,7 @@ static void run_continuous(void)
                     if (gap > c5vrx2_gap_cycles_max)
                         c5vrx2_gap_cycles_max = gap;
                     c5vrx2_rearms++;
+                    c5vrx2_advance_pointer = restarted;
                     c5vrx2_last_pointer = restarted;
                     previous = restarted;
                     fill_started = restarted_at;
@@ -303,8 +343,9 @@ static void run_continuous(void)
                     break;
                 }
                 if ((uint32_t)(cycles() - completed_at) >
-                    cycles_for_us(REARM_ACK_US)) {
-                    c5vrx2_fail_reason = FAIL_RESTART_ACK;
+                    cycles_for_us(REARM_ADVANCE_US)) {
+                    c5vrx2_fail_reason = reset_pointer == PTR_MASK ?
+                        FAIL_RESTART_RESET : FAIL_RESTART_ADVANCE;
                     goto fail;
                 }
             }
@@ -328,7 +369,6 @@ fail:
 stopped:
     final_state = STATE_STOPPED;
 restore:
-    REG32(PARLIO_TX_CLOCK) &= ~PARLIO_CLK_EN;
     REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
     fence_io();
     REG32(HP_SRAM_USAGE) = c5vrx2_saved_ownership;
@@ -345,6 +385,7 @@ int main(void)
     c5vrx2_fault_address = 0u;
     c5vrx2_fault_pc = 0u;
     c5vrx2_stage = 0u;
+    prepare_regdma_chain();
     c5vrx2_command = CMD_NONE;
     c5vrx2_state = STATE_READY;
     for (;;) {
