@@ -121,17 +121,41 @@ esp_err_t c5vrx2_realtime_start(void)
     const bool ran = park_hp_until_terminal();
 
     c5vrx2_parlio_direct_destroy();
+    const uint32_t blocks = ulp_c5vrx2_blocks;
+    const uint32_t fill_avg = blocks != 0u
+        ? ulp_c5vrx2_fill_cycles_total / blocks : 0u;
+    const uint32_t gap_avg = ulp_c5vrx2_rearms != 0u
+        ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u;
+    const uint32_t source_hz = fill_avg != 0u
+        ? (uint32_t)((16384ull * 48000000ull) / fill_avg) : 0u;
+    const uint32_t matched_parlio_hz = (fill_avg + gap_avg) != 0u
+        ? (uint32_t)((4096ull * 48000000ull) / (fill_avg + gap_avg)) : 0u;
+    /* The native USB endpoint is intentionally unavailable while HP is
+     * parked. Repeat the bounded result after SRAM ownership is restored so a
+     * WebSerial terminal opened after re-enumeration can still collect it. */
+    for (unsigned report = 1u; report <= 30u; ++report) {
+        ESP_LOGE(TAG,
+                 "CADENCE MEASURED report=%u/30 blocks=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u source_hz=%u matched_parlio_hz=%u",
+                 report,
+                 (unsigned)blocks,
+                 (unsigned)ulp_c5vrx2_fill_cycles_min,
+                 (unsigned)fill_avg,
+                 (unsigned)ulp_c5vrx2_fill_cycles_last,
+                 (unsigned)ulp_c5vrx2_fill_cycles_max,
+                 (unsigned)ulp_c5vrx2_gap_cycles_min,
+                 (unsigned)gap_avg,
+                 (unsigned)ulp_c5vrx2_gap_cycles_last,
+                 (unsigned)ulp_c5vrx2_gap_cycles_max,
+                 (unsigned)source_hz,
+                 (unsigned)matched_parlio_hz);
+        if (report != 30u) vTaskDelay(pdMS_TO_TICKS(1000u));
+    }
     ESP_LOGE(TAG,
-             "REALTIME STOP state=%u ran=%u blocks=%u rearms=%u failures=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u fault=%u addr=0x%08x pc=0x%08x",
+             "REALTIME STOP state=%u ran=%u blocks=%u rearms=%u failures=%u fault=%u addr=0x%08x pc=0x%08x",
              (unsigned)ulp_c5vrx2_state, ran ? 1u : 0u,
-             (unsigned)ulp_c5vrx2_blocks,
+             (unsigned)blocks,
              (unsigned)ulp_c5vrx2_rearms,
              (unsigned)ulp_c5vrx2_rearm_failures,
-             (unsigned)ulp_c5vrx2_gap_cycles_min,
-             (unsigned)(ulp_c5vrx2_rearms != 0u
-                 ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u),
-             (unsigned)ulp_c5vrx2_gap_cycles_last,
-             (unsigned)ulp_c5vrx2_gap_cycles_max,
              (unsigned)ulp_c5vrx2_fault_cause,
              (unsigned)ulp_c5vrx2_fault_address,
              (unsigned)ulp_c5vrx2_fault_pc);

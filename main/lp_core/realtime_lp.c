@@ -39,6 +39,7 @@
 #define STATE_STOPPED  4u
 
 #define TELEMETRY_MAGIC 0x43355232u /* "C5R2" */
+#define DIAGNOSTIC_BLOCK_LIMIT 256u
 
 volatile uint32_t c5vrx2_command;
 volatile uint32_t c5vrx2_state;
@@ -50,6 +51,10 @@ volatile uint32_t c5vrx2_gap_cycles_last;
 volatile uint32_t c5vrx2_gap_cycles_min;
 volatile uint32_t c5vrx2_gap_cycles_max;
 volatile uint32_t c5vrx2_gap_cycles_total;
+volatile uint32_t c5vrx2_fill_cycles_last;
+volatile uint32_t c5vrx2_fill_cycles_min;
+volatile uint32_t c5vrx2_fill_cycles_max;
+volatile uint32_t c5vrx2_fill_cycles_total;
 volatile uint32_t c5vrx2_telemetry_magic;
 volatile uint32_t c5vrx2_last_pointer;
 volatile uint32_t c5vrx2_saved_ownership;
@@ -174,6 +179,10 @@ static void run_continuous(void)
     c5vrx2_gap_cycles_min = UINT32_MAX;
     c5vrx2_gap_cycles_max = 0u;
     c5vrx2_gap_cycles_total = 0u;
+    c5vrx2_fill_cycles_last = 0u;
+    c5vrx2_fill_cycles_min = UINT32_MAX;
+    c5vrx2_fill_cycles_max = 0u;
+    c5vrx2_fill_cycles_total = 0u;
     c5vrx2_telemetry_magic = TELEMETRY_MAGIC;
     c5vrx2_stage = 1u;
 
@@ -183,6 +192,7 @@ static void run_continuous(void)
     fence_io();
     c5vrx2_stage = 2u;
 
+    uint32_t fill_started = cycles();
     start_writer_once();
     c5vrx2_stage = 3u;
 
@@ -212,6 +222,13 @@ static void run_continuous(void)
 
         if ((control & CTRL_DONE) != 0u && current == PTR_MASK) {
             const uint32_t completed_at = cycles();
+            const uint32_t fill = completed_at - fill_started;
+            c5vrx2_fill_cycles_last = fill;
+            c5vrx2_fill_cycles_total += fill;
+            if (fill < c5vrx2_fill_cycles_min)
+                c5vrx2_fill_cycles_min = fill;
+            if (fill > c5vrx2_fill_cycles_max)
+                c5vrx2_fill_cycles_max = fill;
 
             /* HOT PATH: after DONE+terminal pointer, the next operation is the
              * REGDMA restart. No block-rate math, consumer tracking or logs. */
@@ -233,7 +250,8 @@ static void run_continuous(void)
                     c5vrx2_rearms++;
                     c5vrx2_blocks++;
                     c5vrx2_last_pointer = restarted;
-                    last_progress = cycles();
+                    fill_started = cycles();
+                    last_progress = fill_started;
                     break;
                 }
                 if ((uint32_t)(cycles() - completed_at) > cycles_for_us(5000u)) {
@@ -241,6 +259,7 @@ static void run_continuous(void)
                     goto fail_no_increment;
                 }
             }
+            if (c5vrx2_blocks >= DIAGNOSTIC_BLOCK_LIMIT) goto stopped;
         }
 
         /* Writer-stall watchdog only; VTX/video content is never inspected. */
