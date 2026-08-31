@@ -87,7 +87,7 @@ esp_err_t c5vrx2_realtime_start(void)
     if (err != ESP_OK) return err;
 
     ESP_LOGW(TAG,
-             "REALTIME ARM: A1 IQ -> unrearmed 16K wrap probe -> phase-delta -> 20MS/s PARLIO; HP parked 5s");
+             "REALTIME ARM: A1 IQ -> DONE-cleared direct LP 16K rearm -> phase-delta -> 20MS/s PARLIO; HP parked");
 
     /* Once LP lends 0x40830000..0x4083ffff to MAC dump, HP must not run normal
      * scheduler/interrupt code. Healthy realtime service stays parked. */
@@ -100,26 +100,34 @@ esp_err_t c5vrx2_realtime_start(void)
      * hardware directly and keep the allocated objects intact for logging. */
     c5vrx2_parlio_direct_quiesce();
     const uint32_t blocks = ulp_c5vrx2_blocks;
-    const uint32_t observed_cycles = ulp_c5vrx2_observed_cycles;
-    const uint32_t observed_words = ulp_c5vrx2_observed_words;
-    const uint32_t source_hz = observed_cycles != 0u
-        ? (uint32_t)((uint64_t)observed_words * 48000000ull /
-                     observed_cycles) : 0u;
-    const uint32_t matched_parlio_hz = source_hz / 4u;
+    const uint32_t fill_avg = blocks != 0u
+        ? ulp_c5vrx2_fill_cycles_total / blocks : 0u;
+    const uint32_t gap_avg = ulp_c5vrx2_rearms != 0u
+        ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u;
+    const uint32_t source_hz = fill_avg != 0u
+        ? (uint32_t)((16384ull * 48000000ull) / fill_avg) : 0u;
+    const uint32_t matched_parlio_hz = (fill_avg + gap_avg) != 0u
+        ? (uint32_t)((4096ull * 48000000ull) /
+                     (fill_avg + gap_avg)) : 0u;
     /* The native USB endpoint is intentionally unavailable while HP is
      * parked. Repeat the bounded result after SRAM ownership is restored so a
      * WebSerial terminal opened after re-enumeration can still collect it. */
     for (unsigned report = 1u; report <= 30u; ++report) {
         ESP_LOGE(TAG,
-                 "WRAP PROBE report=%u/30 state=%u words=%u wraps=%u cycles=%u pointer_changes=%u last_ptr=%u done_seen=%u source_hz=%u matched_parlio_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x start_ctrl=0x%08x",
+                 "CADENCE MEASURED report=%u/30 state=%u blocks=%u rearms=%u failures=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u source_hz=%u matched_parlio_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x arm_ctrl=0x%08x",
                  report,
                  (unsigned)ulp_c5vrx2_state,
-                 (unsigned)observed_words,
-                 (unsigned)ulp_c5vrx2_observed_wraps,
-                 (unsigned)observed_cycles,
-                 (unsigned)ulp_c5vrx2_pointer_changes,
-                 (unsigned)ulp_c5vrx2_last_pointer,
-                 (unsigned)ulp_c5vrx2_done_seen,
+                 (unsigned)blocks,
+                 (unsigned)ulp_c5vrx2_rearms,
+                 (unsigned)ulp_c5vrx2_rearm_failures,
+                 (unsigned)ulp_c5vrx2_fill_cycles_min,
+                 (unsigned)fill_avg,
+                 (unsigned)ulp_c5vrx2_fill_cycles_last,
+                 (unsigned)ulp_c5vrx2_fill_cycles_max,
+                 (unsigned)ulp_c5vrx2_gap_cycles_min,
+                 (unsigned)gap_avg,
+                 (unsigned)ulp_c5vrx2_gap_cycles_last,
+                 (unsigned)ulp_c5vrx2_gap_cycles_max,
                  (unsigned)source_hz,
                  (unsigned)matched_parlio_hz,
                  (unsigned)ulp_c5vrx2_fail_reason,
@@ -129,7 +137,7 @@ esp_err_t c5vrx2_realtime_start(void)
         if (report != 30u) vTaskDelay(pdMS_TO_TICKS(1000u));
     }
     ESP_LOGE(TAG,
-             "REALTIME STOP state=%u ran=%u wraps=%u rearms=%u failures=%u fault=%u addr=0x%08x pc=0x%08x",
+             "REALTIME STOP state=%u ran=%u blocks=%u rearms=%u failures=%u fault=%u addr=0x%08x pc=0x%08x",
              (unsigned)ulp_c5vrx2_state, ran ? 1u : 0u,
              (unsigned)blocks,
              (unsigned)ulp_c5vrx2_rearms,

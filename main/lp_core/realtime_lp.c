@@ -25,12 +25,15 @@
 #define STATE_STOPPED  4u
 
 #define TELEMETRY_MAGIC 0x43355232u /* "C5R2" */
-#define WRAP_PROBE_US 5000000u
-#define WRITER_STALL_US 100000u
+#define DIAGNOSTIC_BLOCK_LIMIT 256u
+#define WRITER_STALL_US 250000u
+#define REARM_ACK_US 5000u
 
 #define FAIL_NONE         0u
 #define FAIL_INITIAL_LEAD 1u
 #define FAIL_WRITER_STALL 2u
+#define FAIL_DISABLE_ACK  3u
+#define FAIL_RESTART_ACK  4u
 
 volatile uint32_t c5vrx2_command;
 volatile uint32_t c5vrx2_state;
@@ -90,18 +93,30 @@ static inline uint32_t pointer(void)
     return pointer_mode() & PTR_MASK;
 }
 
-/* Exact vendor mode-0 enable/software-trigger sequence. */
-static inline void start_writer_once(void)
+/* Disable from a clean control image.  DONE is an observed status bit, but
+ * carrying its sampled 1 back into every RMW write made the physical writer
+ * intermittently remain terminal at 0x80044000. */
+static inline bool arm_writer_direct(void)
 {
-    uint32_t c = REG32(DUMP_CTRL) & ~CTRL_ENABLE;
+    uint32_t c = REG32(DUMP_CTRL) &
+                 ~(CTRL_ENABLE | CTRL_START | CTRL_DONE);
     REG32(DUMP_CTRL) = c;
     fence_io();
+
+    const uint32_t disabled_at = cycles();
+    while ((REG32(DUMP_CTRL) & (CTRL_ENABLE | CTRL_DONE)) != 0u) {
+        if ((uint32_t)(cycles() - disabled_at) > cycles_for_us(REARM_ACK_US))
+            return false;
+    }
+
     c |= CTRL_ENABLE;
     REG32(DUMP_CTRL) = c;
     REG32(DUMP_CTRL) = c | CTRL_START;
-    REG32(DUMP_CTRL) = c & ~CTRL_START;
+    REG32(DUMP_CTRL) = c;
     fence_io();
     c5vrx2_start_control = REG32(DUMP_CTRL);
+    return (c5vrx2_start_control & CTRL_ENABLE) != 0u &&
+           (c5vrx2_start_control & CTRL_DONE) == 0u;
 }
 
 void __attribute__((noreturn)) ulp_lp_core_panic_handler(RvExcFrame *frame,
@@ -155,7 +170,10 @@ static void run_continuous(void)
     fence_io();
     c5vrx2_stage = 2u;
 
-    start_writer_once();
+    if (!arm_writer_direct()) {
+        c5vrx2_fail_reason = FAIL_DISABLE_ACK;
+        goto fail;
+    }
     c5vrx2_stage = 3u;
 
     uint32_t previous = pointer();
@@ -178,9 +196,8 @@ static void run_continuous(void)
     c5vrx2_state = STATE_RUNNING;
     c5vrx2_stage = 4u;
 
-    const uint32_t measured_at = cycles();
-    uint32_t last_progress = measured_at;
-    previous = pointer();
+    uint32_t fill_started = lead_start;
+    uint32_t last_progress = cycles();
     for (;;) {
         if (c5vrx2_command == CMD_STOP) goto stopped;
         const uint32_t now = cycles();
@@ -189,23 +206,56 @@ static void run_continuous(void)
 
         if ((control & CTRL_DONE) != 0u) c5vrx2_done_seen = 1u;
         if (current != previous) {
-            const uint32_t delta = (current - previous) & PTR_MASK;
-            c5vrx2_observed_words += delta;
-            if (current < previous) {
-                c5vrx2_observed_wraps++;
-                c5vrx2_blocks++;
-            }
-            c5vrx2_pointer_changes++;
             c5vrx2_last_pointer = current;
             previous = current;
             last_progress = now;
         }
 
-        c5vrx2_observed_cycles = now - measured_at;
-        if (c5vrx2_observed_cycles >= cycles_for_us(WRAP_PROBE_US))
-            goto stopped;
+        if ((control & CTRL_DONE) != 0u && current == PTR_MASK) {
+            const uint32_t completed_at = now;
+            const uint32_t fill = completed_at - fill_started;
+            c5vrx2_fill_cycles_last = fill;
+            c5vrx2_fill_cycles_total += fill;
+            if (fill < c5vrx2_fill_cycles_min)
+                c5vrx2_fill_cycles_min = fill;
+            if (fill > c5vrx2_fill_cycles_max)
+                c5vrx2_fill_cycles_max = fill;
+            c5vrx2_blocks++;
 
-        /* A true continuous ring must keep moving without software rearms. */
+            if (!arm_writer_direct()) {
+                c5vrx2_fail_reason = FAIL_DISABLE_ACK;
+                goto fail;
+            }
+
+            for (;;) {
+                const uint32_t restarted = pointer();
+                if (restarted != PTR_MASK) {
+                    const uint32_t restarted_at = cycles();
+                    const uint32_t gap = restarted_at - completed_at;
+                    c5vrx2_gap_cycles_last = gap;
+                    c5vrx2_gap_cycles_total += gap;
+                    if (gap < c5vrx2_gap_cycles_min)
+                        c5vrx2_gap_cycles_min = gap;
+                    if (gap > c5vrx2_gap_cycles_max)
+                        c5vrx2_gap_cycles_max = gap;
+                    c5vrx2_rearms++;
+                    c5vrx2_last_pointer = restarted;
+                    previous = restarted;
+                    fill_started = restarted_at;
+                    last_progress = restarted_at;
+                    break;
+                }
+                if ((uint32_t)(cycles() - completed_at) >
+                    cycles_for_us(REARM_ACK_US)) {
+                    c5vrx2_fail_reason = FAIL_RESTART_ACK;
+                    goto fail;
+                }
+            }
+
+            if (c5vrx2_blocks >= DIAGNOSTIC_BLOCK_LIMIT) goto stopped;
+        }
+
+        /* Writer-stall watchdog only; VTX/video content is never inspected. */
         if ((uint32_t)(now - last_progress) > cycles_for_us(WRITER_STALL_US)) {
             c5vrx2_fail_reason = FAIL_WRITER_STALL;
             goto fail;
