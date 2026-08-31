@@ -42,6 +42,7 @@
 
 #define TELEMETRY_MAGIC 0x43355232u /* "C5R2" */
 #define DIAGNOSTIC_BLOCK_LIMIT 256u
+#define DIAGNOSTIC_WINDOW_US 30000000u
 #define WRITER_STALL_US 250000u
 #define REARM_ADVANCE_US 250000u
 
@@ -93,6 +94,12 @@ volatile uint32_t c5vrx2_regdma_timed_out;
 volatile uint32_t c5vrx2_reset_pointer;
 volatile uint32_t c5vrx2_reset_cycles;
 volatile uint32_t c5vrx2_advance_pointer;
+volatile uint32_t c5vrx2_activity_pauses;
+volatile uint32_t c5vrx2_activity_resumes;
+volatile uint32_t c5vrx2_pause_cycles_last;
+volatile uint32_t c5vrx2_pause_cycles_max;
+volatile uint32_t c5vrx2_pause_active;
+volatile uint32_t c5vrx2_run_cycles;
 
 static inline void fence_io(void)
 {
@@ -249,6 +256,12 @@ static void run_continuous(void)
     c5vrx2_reset_pointer = PTR_MASK;
     c5vrx2_reset_cycles = 0u;
     c5vrx2_advance_pointer = PTR_MASK;
+    c5vrx2_activity_pauses = 0u;
+    c5vrx2_activity_resumes = 0u;
+    c5vrx2_pause_cycles_last = 0u;
+    c5vrx2_pause_cycles_max = 0u;
+    c5vrx2_pause_active = 0u;
+    c5vrx2_run_cycles = 0u;
     c5vrx2_stage = 1u;
 
     c5vrx2_saved_ownership = REG32(HP_SRAM_USAGE);
@@ -265,8 +278,11 @@ static void run_continuous(void)
     const uint32_t lead_start = cycles();
     while (lead < 8192u) {
         const uint32_t current = pointer();
-        if (current != previous) {
-            lead += (current - previous) & PTR_MASK;
+        if (current > previous) {
+            const uint32_t delta = current - previous;
+            lead += delta;
+            c5vrx2_observed_words += delta;
+            c5vrx2_pointer_changes++;
             previous = current;
         }
         if ((uint32_t)(cycles() - lead_start) > cycles_for_us(WRITER_STALL_US)) {
@@ -278,19 +294,38 @@ static void run_continuous(void)
     c5vrx2_state = STATE_RUNNING;
     c5vrx2_stage = 4u;
 
+    const uint32_t run_started = cycles();
     uint32_t fill_started = lead_start;
-    uint32_t last_progress = cycles();
+    uint32_t last_progress = run_started;
+    uint32_t pause_started = 0u;
+    bool paused = false;
     for (;;) {
         if (c5vrx2_command == CMD_STOP) goto stopped;
         const uint32_t now = cycles();
         const uint32_t current = pointer();
         const uint32_t control = REG32(DUMP_CTRL);
 
+        c5vrx2_run_cycles = now - run_started;
+        if (c5vrx2_run_cycles >= cycles_for_us(DIAGNOSTIC_WINDOW_US))
+            goto stopped;
+
         if ((control & CTRL_DONE) != 0u) c5vrx2_done_seen = 1u;
-        if (current != previous) {
+        if (current > previous) {
+            const uint32_t delta = current - previous;
+            c5vrx2_observed_words += delta;
+            c5vrx2_pointer_changes++;
             c5vrx2_last_pointer = current;
             previous = current;
             last_progress = now;
+            if (paused) {
+                const uint32_t pause_cycles = now - pause_started;
+                c5vrx2_pause_cycles_last = pause_cycles;
+                if (pause_cycles > c5vrx2_pause_cycles_max)
+                    c5vrx2_pause_cycles_max = pause_cycles;
+                c5vrx2_activity_resumes++;
+                c5vrx2_pause_active = 0u;
+                paused = false;
+            }
         }
 
         if ((control & CTRL_DONE) != 0u && current == PTR_MASK) {
@@ -337,6 +372,9 @@ static void run_continuous(void)
                     c5vrx2_rearms++;
                     c5vrx2_advance_pointer = restarted;
                     c5vrx2_last_pointer = restarted;
+                    c5vrx2_observed_words +=
+                        (restarted - reset_pointer) & PTR_MASK;
+                    c5vrx2_pointer_changes++;
                     previous = restarted;
                     fill_started = restarted_at;
                     last_progress = restarted_at;
@@ -353,10 +391,16 @@ static void run_continuous(void)
             if (c5vrx2_blocks >= DIAGNOSTIC_BLOCK_LIMIT) goto stopped;
         }
 
-        /* Writer-stall watchdog only; VTX/video content is never inspected. */
-        if ((uint32_t)(now - last_progress) > cycles_for_us(WRITER_STALL_US)) {
-            c5vrx2_fail_reason = FAIL_WRITER_STALL;
-            goto fail;
+        /* Mode 0 is RF-activity dependent. Keep the writer armed for the full
+         * diagnostic window and distinguish an inactive interval from a
+         * failed REGDMA rearm. A later pointer change proves activity resumed
+         * in the same generation without another software trigger. */
+        if (!paused &&
+            (uint32_t)(now - last_progress) > cycles_for_us(WRITER_STALL_US)) {
+            paused = true;
+            pause_started = last_progress;
+            c5vrx2_activity_pauses++;
+            c5vrx2_pause_active = 1u;
         }
     }
 
@@ -367,6 +411,12 @@ fail:
     final_state = STATE_ERROR;
     goto restore;
 stopped:
+    if (paused) {
+        const uint32_t pause_cycles = cycles() - pause_started;
+        c5vrx2_pause_cycles_last = pause_cycles;
+        if (pause_cycles > c5vrx2_pause_cycles_max)
+            c5vrx2_pause_cycles_max = pause_cycles;
+    }
     final_state = STATE_STOPPED;
 restore:
     REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
