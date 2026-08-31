@@ -51,7 +51,6 @@
 #define FAIL_WRITER_STALL 2u
 #define FAIL_PAU_CHAIN    3u
 #define FAIL_RESTART_RESET 4u
-#define FAIL_RESTART_ADVANCE 5u
 
 volatile uint32_t c5vrx2_command;
 volatile uint32_t c5vrx2_state;
@@ -366,6 +365,16 @@ static void run_continuous(void)
                 } else if (reset_pointer != PTR_MASK &&
                            restarted != reset_pointer) {
                     const uint32_t restarted_at = cycles();
+                    if (paused) {
+                        const uint32_t pause_cycles =
+                            restarted_at - pause_started;
+                        c5vrx2_pause_cycles_last = pause_cycles;
+                        if (pause_cycles > c5vrx2_pause_cycles_max)
+                            c5vrx2_pause_cycles_max = pause_cycles;
+                        c5vrx2_activity_resumes++;
+                        c5vrx2_pause_active = 0u;
+                        paused = false;
+                    }
                     const uint32_t gap = restarted_at - completed_at;
                     c5vrx2_gap_cycles_last = gap;
                     c5vrx2_gap_cycles_total += gap;
@@ -384,11 +393,24 @@ static void run_continuous(void)
                     last_progress = restarted_at;
                     break;
                 }
-                if ((uint32_t)(cycles() - completed_at) >
-                    cycles_for_us(REARM_ADVANCE_US)) {
-                    c5vrx2_fail_reason = reset_pointer == PTR_MASK ?
-                        FAIL_RESTART_RESET : FAIL_RESTART_ADVANCE;
+                const uint32_t waited = cycles() - completed_at;
+                if (reset_pointer == PTR_MASK &&
+                    waited > cycles_for_us(REARM_ADVANCE_US)) {
+                    /* PAU completed but the dump controller itself never
+                     * reset: this is a genuine rearm failure. */
+                    c5vrx2_fail_reason = FAIL_RESTART_RESET;
                     goto fail;
+                }
+                if (reset_pointer != PTR_MASK && !paused &&
+                    waited > cycles_for_us(WRITER_STALL_US)) {
+                    /* Mode 0 can remain armed at its reset pointer while RF
+                     * activity is absent.  That is not a failed rearm: keep
+                     * waiting so a later VTX burst resumes this generation
+                     * without another software trigger. */
+                    paused = true;
+                    pause_started = reset_at;
+                    c5vrx2_activity_pauses++;
+                    c5vrx2_pause_active = 1u;
                 }
             }
 
