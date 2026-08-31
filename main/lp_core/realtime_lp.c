@@ -12,6 +12,7 @@
 #define CTRL_START       0x00080000u
 #define CTRL_DONE        0x00040000u
 #define PTR_MASK         0x00003fffu
+#define MODE0_SELECTOR   0x01e00000u
 #define PARLIO_CLK_EN    0x00040000u
 
 #define CMD_NONE       0u
@@ -65,6 +66,7 @@ volatile uint32_t c5vrx2_fail_reason;
 volatile uint32_t c5vrx2_fail_control;
 volatile uint32_t c5vrx2_fail_pointer_mode;
 volatile uint32_t c5vrx2_start_control;
+volatile uint32_t c5vrx2_arm_pointer_mode;
 
 static inline void fence_io(void)
 {
@@ -108,6 +110,13 @@ static inline bool arm_writer_direct(void)
         if ((uint32_t)(cycles() - disabled_at) > cycles_for_us(REARM_ACK_US))
             return false;
     }
+
+    /* Mode-0 selector bit 24 is consumed/cleared at each terminal boundary.
+     * Without reasserting the full recovered selector, ENABLE+START resets the
+     * pointer but the next one-shot receives no source samples. */
+    REG32(DUMP_PTR) |= MODE0_SELECTOR;
+    fence_io();
+    c5vrx2_arm_pointer_mode = REG32(DUMP_PTR);
 
     c |= CTRL_ENABLE;
     REG32(DUMP_CTRL) = c;
@@ -162,6 +171,7 @@ static void run_continuous(void)
     c5vrx2_fail_control = 0u;
     c5vrx2_fail_pointer_mode = 0u;
     c5vrx2_start_control = 0u;
+    c5vrx2_arm_pointer_mode = 0u;
     c5vrx2_stage = 1u;
 
     c5vrx2_saved_ownership = REG32(HP_SRAM_USAGE);
