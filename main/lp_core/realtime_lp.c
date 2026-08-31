@@ -25,7 +25,12 @@
 #define STATE_STOPPED  4u
 
 #define TELEMETRY_MAGIC 0x43355232u /* "C5R2" */
-#define DIAGNOSTIC_BLOCK_LIMIT 256u
+#define WRAP_PROBE_US 5000000u
+#define WRITER_STALL_US 100000u
+
+#define FAIL_NONE         0u
+#define FAIL_INITIAL_LEAD 1u
+#define FAIL_WRITER_STALL 2u
 
 volatile uint32_t c5vrx2_command;
 volatile uint32_t c5vrx2_state;
@@ -48,6 +53,15 @@ volatile uint32_t c5vrx2_fault_cause;
 volatile uint32_t c5vrx2_fault_address;
 volatile uint32_t c5vrx2_fault_pc;
 volatile uint32_t c5vrx2_stage;
+volatile uint32_t c5vrx2_observed_words;
+volatile uint32_t c5vrx2_observed_wraps;
+volatile uint32_t c5vrx2_observed_cycles;
+volatile uint32_t c5vrx2_pointer_changes;
+volatile uint32_t c5vrx2_done_seen;
+volatile uint32_t c5vrx2_fail_reason;
+volatile uint32_t c5vrx2_fail_control;
+volatile uint32_t c5vrx2_fail_pointer_mode;
+volatile uint32_t c5vrx2_start_control;
 
 static inline void fence_io(void)
 {
@@ -66,13 +80,17 @@ static inline uint32_t cycles_for_us(uint32_t us)
     return us * LP_CORE_CYCLES_PER_US_NUM / LP_CORE_CYCLES_PER_US_DENOM;
 }
 
-static inline uint32_t pointer(void)
+static inline uint32_t pointer_mode(void)
 {
-    return REG32(DUMP_PTR) & PTR_MASK;
+    return REG32(DUMP_PTR);
 }
 
-/* Both initial start and every 16K boundary use the same direct modem sequence
- * from the LP core. */
+static inline uint32_t pointer(void)
+{
+    return pointer_mode() & PTR_MASK;
+}
+
+/* Exact vendor mode-0 enable/software-trigger sequence. */
 static inline void start_writer_once(void)
 {
     uint32_t c = REG32(DUMP_CTRL) & ~CTRL_ENABLE;
@@ -83,22 +101,7 @@ static inline void start_writer_once(void)
     REG32(DUMP_CTRL) = c | CTRL_START;
     REG32(DUMP_CTRL) = c & ~CTRL_START;
     fence_io();
-}
-
-static inline bool rearm_direct_now(void)
-{
-    /* PAU/REGDMA was physically observed to fail after only five rearms.  The
-     * 48 MHz LP core already owns the hot loop and can issue the proven modem
-     * sequence itself without involving another state machine. */
-    uint32_t c = REG32(DUMP_CTRL) & ~CTRL_ENABLE;
-    REG32(DUMP_CTRL) = c;
-    fence_io();
-    c |= CTRL_ENABLE;
-    REG32(DUMP_CTRL) = c;
-    REG32(DUMP_CTRL) = c | CTRL_START;
-    REG32(DUMP_CTRL) = c & ~CTRL_START;
-    fence_io();
-    return true;
+    c5vrx2_start_control = REG32(DUMP_CTRL);
 }
 
 void __attribute__((noreturn)) ulp_lp_core_panic_handler(RvExcFrame *frame,
@@ -135,6 +138,15 @@ static void run_continuous(void)
     c5vrx2_fill_cycles_max = 0u;
     c5vrx2_fill_cycles_total = 0u;
     c5vrx2_telemetry_magic = TELEMETRY_MAGIC;
+    c5vrx2_observed_words = 0u;
+    c5vrx2_observed_wraps = 0u;
+    c5vrx2_observed_cycles = 0u;
+    c5vrx2_pointer_changes = 0u;
+    c5vrx2_done_seen = 0u;
+    c5vrx2_fail_reason = FAIL_NONE;
+    c5vrx2_fail_control = 0u;
+    c5vrx2_fail_pointer_mode = 0u;
+    c5vrx2_start_control = 0u;
     c5vrx2_stage = 1u;
 
     c5vrx2_saved_ownership = REG32(HP_SRAM_USAGE);
@@ -143,7 +155,6 @@ static void run_continuous(void)
     fence_io();
     c5vrx2_stage = 2u;
 
-    uint32_t fill_started = cycles();
     start_writer_once();
     c5vrx2_stage = 3u;
 
@@ -152,12 +163,14 @@ static void run_continuous(void)
     const uint32_t lead_start = cycles();
     while (lead < 8192u) {
         const uint32_t current = pointer();
-        if (current > previous) {
-            lead += current - previous;
+        if (current != previous) {
+            lead += (current - previous) & PTR_MASK;
             previous = current;
         }
-        if ((uint32_t)(cycles() - lead_start) > cycles_for_us(100000u))
+        if ((uint32_t)(cycles() - lead_start) > cycles_for_us(WRITER_STALL_US)) {
+            c5vrx2_fail_reason = FAIL_INITIAL_LEAD;
             goto fail;
+        }
     }
 
     REG32(PARLIO_TX_CLOCK) |= PARLIO_CLK_EN;
@@ -165,62 +178,44 @@ static void run_continuous(void)
     c5vrx2_state = STATE_RUNNING;
     c5vrx2_stage = 4u;
 
-    uint32_t last_progress = cycles();
+    const uint32_t measured_at = cycles();
+    uint32_t last_progress = measured_at;
+    previous = pointer();
     for (;;) {
         if (c5vrx2_command == CMD_STOP) goto stopped;
+        const uint32_t now = cycles();
         const uint32_t current = pointer();
         const uint32_t control = REG32(DUMP_CTRL);
 
-        if ((control & CTRL_DONE) != 0u && current == PTR_MASK) {
-            const uint32_t completed_at = cycles();
-            const uint32_t fill = completed_at - fill_started;
-            c5vrx2_fill_cycles_last = fill;
-            c5vrx2_fill_cycles_total += fill;
-            if (fill < c5vrx2_fill_cycles_min)
-                c5vrx2_fill_cycles_min = fill;
-            if (fill > c5vrx2_fill_cycles_max)
-                c5vrx2_fill_cycles_max = fill;
-
-            /* HOT PATH: after DONE+terminal pointer, immediately restart the
-             * writer. No block-rate math, consumer tracking or logs. */
-            if (!rearm_direct_now()) {
-                c5vrx2_rearm_failures++;
-                goto fail_no_increment;
+        if ((control & CTRL_DONE) != 0u) c5vrx2_done_seen = 1u;
+        if (current != previous) {
+            const uint32_t delta = (current - previous) & PTR_MASK;
+            c5vrx2_observed_words += delta;
+            if (current < previous) {
+                c5vrx2_observed_wraps++;
+                c5vrx2_blocks++;
             }
-
-            for (;;) {
-                const uint32_t restarted = pointer();
-                if (restarted != PTR_MASK) {
-                    const uint32_t gap = cycles() - completed_at;
-                    c5vrx2_gap_cycles_last = gap;
-                    c5vrx2_gap_cycles_total += gap;
-                    if (gap < c5vrx2_gap_cycles_min)
-                        c5vrx2_gap_cycles_min = gap;
-                    if (gap > c5vrx2_gap_cycles_max)
-                        c5vrx2_gap_cycles_max = gap;
-                    c5vrx2_rearms++;
-                    c5vrx2_blocks++;
-                    c5vrx2_last_pointer = restarted;
-                    fill_started = cycles();
-                    last_progress = fill_started;
-                    break;
-                }
-                if ((uint32_t)(cycles() - completed_at) > cycles_for_us(5000u)) {
-                    c5vrx2_rearm_failures++;
-                    goto fail_no_increment;
-                }
-            }
-            if (c5vrx2_blocks >= DIAGNOSTIC_BLOCK_LIMIT) goto stopped;
+            c5vrx2_pointer_changes++;
+            c5vrx2_last_pointer = current;
+            previous = current;
+            last_progress = now;
         }
 
-        /* Writer-stall watchdog only; VTX/video content is never inspected. */
-        if ((uint32_t)(cycles() - last_progress) > cycles_for_us(250000u))
+        c5vrx2_observed_cycles = now - measured_at;
+        if (c5vrx2_observed_cycles >= cycles_for_us(WRAP_PROBE_US))
+            goto stopped;
+
+        /* A true continuous ring must keep moving without software rearms. */
+        if ((uint32_t)(now - last_progress) > cycles_for_us(WRITER_STALL_US)) {
+            c5vrx2_fail_reason = FAIL_WRITER_STALL;
             goto fail;
+        }
     }
 
 fail:
     c5vrx2_rearm_failures++;
-fail_no_increment:
+    c5vrx2_fail_control = REG32(DUMP_CTRL);
+    c5vrx2_fail_pointer_mode = pointer_mode();
     final_state = STATE_ERROR;
     goto restore;
 stopped:
