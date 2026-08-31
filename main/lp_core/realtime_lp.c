@@ -5,9 +5,6 @@
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define DUMP_CTRL        0x600a9004u
 #define DUMP_PTR         0x600a9008u
-#define PAU_REGDMA_CONF  0x60093000u
-#define PAU_INT_RAW      0x6009301cu
-#define PAU_INT_CLR      0x60093020u
 #define HP_SRAM_USAGE    0x60095004u
 #define PARLIO_TX_CLOCK  0x600960b4u
 
@@ -16,17 +13,6 @@
 #define CTRL_DONE        0x00040000u
 #define PTR_MASK         0x00003fffu
 #define PARLIO_CLK_EN    0x00040000u
-
-#define PAU_START        0x00000008u
-#define PAU_TO_MEM       0x00000010u
-#define PAU_LINK_SEL_M   0x000001e0u
-#define PAU_LINK3        0x00000060u
-#define PAU_DONE_RAW     0x00000001u
-#define PAU_ERROR_RAW    0x00000002u
-#define PAU_TIMEOUT_CYCLES 8192u
-
-#define REGDMA_WRITE_HEAD     0x40020000u
-#define REGDMA_WRITE_HEAD_EOF 0xc0020000u
 
 #define CMD_NONE       0u
 #define CMD_CONTINUOUS 1u
@@ -62,8 +48,6 @@ volatile uint32_t c5vrx2_fault_cause;
 volatile uint32_t c5vrx2_fault_address;
 volatile uint32_t c5vrx2_fault_pc;
 volatile uint32_t c5vrx2_stage;
-volatile uint32_t c5vrx2_regdma_link_root;
-volatile uint32_t c5vrx2_regdma_nodes[4][7];
 
 static inline void fence_io(void)
 {
@@ -87,33 +71,8 @@ static inline uint32_t pointer(void)
     return REG32(DUMP_PTR) & PTR_MASK;
 }
 
-static void prepare_regdma_chain(void)
-{
-    for (uint32_t i = 0; i < 4u; ++i) {
-        for (uint32_t j = 0; j < 7u; ++j) c5vrx2_regdma_nodes[i][j] = 0u;
-        c5vrx2_regdma_nodes[i][2] =
-            i == 3u ? REGDMA_WRITE_HEAD_EOF : REGDMA_WRITE_HEAD;
-        c5vrx2_regdma_nodes[i][3] = i == 3u ? 0u :
-            (uint32_t)(uintptr_t)&c5vrx2_regdma_nodes[i + 1u][2];
-        c5vrx2_regdma_nodes[i][4] = DUMP_CTRL;
-    }
-    /* Exact proven sequence: ENABLE 0 -> ENABLE 1 -> START 1 -> START 0. */
-    c5vrx2_regdma_nodes[0][5] = 0u;
-    c5vrx2_regdma_nodes[0][6] = CTRL_ENABLE;
-    c5vrx2_regdma_nodes[1][5] = CTRL_ENABLE;
-    c5vrx2_regdma_nodes[1][6] = CTRL_ENABLE;
-    c5vrx2_regdma_nodes[2][5] = CTRL_START;
-    c5vrx2_regdma_nodes[2][6] = CTRL_START;
-    c5vrx2_regdma_nodes[3][5] = 0u;
-    c5vrx2_regdma_nodes[3][6] = CTRL_START;
-    c5vrx2_regdma_link_root =
-        (uint32_t)(uintptr_t)&c5vrx2_regdma_nodes[0][2];
-    fence_io();
-}
-
-/* One-time startup uses direct writes. Every realtime 16K boundary below uses
- * the physically proven PAU/REGDMA chain instead of making the 48 MHz LP core
- * execute the four modem writes itself. */
+/* Both initial start and every 16K boundary use the same direct modem sequence
+ * from the LP core. */
 static inline void start_writer_once(void)
 {
     uint32_t c = REG32(DUMP_CTRL) & ~CTRL_ENABLE;
@@ -126,29 +85,20 @@ static inline void start_writer_once(void)
     fence_io();
 }
 
-static inline bool rearm_regdma_now(void)
+static inline bool rearm_direct_now(void)
 {
-    REG32(PAU_INT_CLR) = PAU_DONE_RAW | PAU_ERROR_RAW;
-    uint32_t conf = REG32(PAU_REGDMA_CONF);
-    conf &= ~(PAU_START | PAU_TO_MEM | PAU_LINK_SEL_M);
-    conf |= PAU_LINK3;
-    REG32(PAU_REGDMA_CONF) = conf;
+    /* PAU/REGDMA was physically observed to fail after only five rearms.  The
+     * 48 MHz LP core already owns the hot loop and can issue the proven modem
+     * sequence itself without involving another state machine. */
+    uint32_t c = REG32(DUMP_CTRL) & ~CTRL_ENABLE;
+    REG32(DUMP_CTRL) = c;
     fence_io();
-    REG32(PAU_REGDMA_CONF) = conf | PAU_START;
+    c |= CTRL_ENABLE;
+    REG32(DUMP_CTRL) = c;
+    REG32(DUMP_CTRL) = c | CTRL_START;
+    REG32(DUMP_CTRL) = c & ~CTRL_START;
     fence_io();
-
-    const uint32_t started = cycles();
-    uint32_t raw;
-    do {
-        raw = REG32(PAU_INT_RAW);
-        if (raw & PAU_ERROR_RAW) break;
-    } while (!(raw & PAU_DONE_RAW) &&
-             (uint32_t)(cycles() - started) < PAU_TIMEOUT_CYCLES);
-
-    REG32(PAU_REGDMA_CONF) = conf & ~PAU_LINK_SEL_M;
-    if ((raw & PAU_ERROR_RAW) == 0u) REG32(PAU_INT_CLR) = PAU_DONE_RAW;
-    fence_io();
-    return (raw & PAU_DONE_RAW) != 0u && (raw & PAU_ERROR_RAW) == 0u;
+    return true;
 }
 
 void __attribute__((noreturn)) ulp_lp_core_panic_handler(RvExcFrame *frame,
@@ -230,9 +180,9 @@ static void run_continuous(void)
             if (fill > c5vrx2_fill_cycles_max)
                 c5vrx2_fill_cycles_max = fill;
 
-            /* HOT PATH: after DONE+terminal pointer, the next operation is the
-             * REGDMA restart. No block-rate math, consumer tracking or logs. */
-            if (!rearm_regdma_now()) {
+            /* HOT PATH: after DONE+terminal pointer, immediately restart the
+             * writer. No block-rate math, consumer tracking or logs. */
+            if (!rearm_direct_now()) {
                 c5vrx2_rearm_failures++;
                 goto fail_no_increment;
             }
@@ -290,7 +240,6 @@ int main(void)
     c5vrx2_fault_address = 0u;
     c5vrx2_fault_pc = 0u;
     c5vrx2_stage = 0u;
-    prepare_regdma_chain();
     c5vrx2_command = CMD_NONE;
     c5vrx2_state = STATE_READY;
     for (;;) {
