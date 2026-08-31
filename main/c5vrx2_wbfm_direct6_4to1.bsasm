@@ -19,8 +19,11 @@ sample_address:
     jmp phase_add
 
 phase_add:
-    set 0..5 L8..L13,
-    set 16..21 L0..L5,
+    # Persist current phase itself, then add (bias-current) to the persisted
+    # previous phase.  This is the measured VTX/CVBS polarity:
+    # output = bias + previous_phase - current_phase (modulo 64).
+    set 0..5 L0..L5,
+    set 16..21 L8..L13,
     read 32,
     ADDCTIBL
 

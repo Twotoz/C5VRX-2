@@ -29,9 +29,10 @@ static void build_phase6_lut(uint16_t lut[LUT_WORDS])
             if (p < 0.0f) p += 2.0f * PI_F;
             const uint8_t phase =
                 (uint8_t)lrintf(p * (64.0f / (2.0f * PI_F))) & 0x3fu;
-            /* Keep the first AV integration on the donor-scale modulo-64
-             * discriminator: bias + current - previous. Polarity and gain
-             * tuning remain deliberately separate from producer validation. */
+            /* The two LUT halves feed the swapped BitScrambler paths:
+             * low byte persists current phase; high byte contributes
+             * bias-current.  Together they implement the measured VTX/CVBS
+             * polarity: bias + previous - current. */
             lut[(i5 << 5) | q5] =
                 (uint16_t)phase |
                 ((uint16_t)((CVBS_ZERO_CODE - phase) & 0x3fu) << 8);
