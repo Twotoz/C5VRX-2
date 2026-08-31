@@ -120,7 +120,12 @@ esp_err_t c5vrx2_realtime_start(void)
      * scheduler/interrupt code. Healthy realtime service stays parked. */
     const bool ran = park_hp_until_terminal();
 
-    c5vrx2_parlio_direct_destroy();
+    /* FreeRTOS/driver objects may have been touched while their backing SRAM
+     * was lent to the RF writer.  Calling the PARLIO driver's queue-based
+     * teardown here triggered xTaskPriorityDisinherit on the physical XIAO.
+     * The bounded diagnostic never starts a second transaction, so quiesce
+     * hardware directly and keep the allocated objects intact for logging. */
+    c5vrx2_parlio_direct_quiesce();
     const uint32_t blocks = ulp_c5vrx2_blocks;
     const uint32_t fill_avg = blocks != 0u
         ? ulp_c5vrx2_fill_cycles_total / blocks : 0u;

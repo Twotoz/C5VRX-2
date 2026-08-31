@@ -70,7 +70,7 @@ fail:
 
 void c5vrx2_parlio_direct_destroy(void)
 {
-    parlio_ll_tx_enable_clock(&PARL_IO, false);
+    c5vrx2_parlio_direct_quiesce();
     if (s_tx) {
         (void)parlio_tx_unit_disable(s_tx);
         (void)parlio_del_tx_unit(s_tx);
@@ -78,4 +78,10 @@ void c5vrx2_parlio_direct_destroy(void)
     }
     c5vrx2_wbfm_direct_destroy(s_bs);
     s_bs = NULL;
+}
+
+void c5vrx2_parlio_direct_quiesce(void)
+{
+    parlio_ll_tx_enable_clock(&PARL_IO, false);
+    parlio_ll_clear_interrupt_status(&PARL_IO, PARLIO_LL_EVENT_TX_MASK);
 }
