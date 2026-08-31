@@ -1,0 +1,139 @@
+#include "realtime.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_attr.h"
+#include "esp_bit_defs.h"
+#include "esp_log.h"
+#include "hal/apm_hal.h"
+#include "soc/apm_defs.h"
+#include "ulp_lp_core.h"
+
+#include "c5vrx2_lp.h"
+#include "parlio_direct.h"
+#include "regdma_rearm.h"
+
+/* ulp_embed_binary() exposes the LP image through linker symbols, matching the
+ * proven C5VRX LP-core donor. The generated c5vrx2_lp.h only declares the LP
+ * shared variables, not these binary bounds. */
+extern const uint8_t c5vrx2_lp_bin_start[]
+    asm("_binary_c5vrx2_lp_bin_start");
+extern const uint8_t c5vrx2_lp_bin_end[]
+    asm("_binary_c5vrx2_lp_bin_end");
+
+#define CMD_CONTINUOUS 1u
+#define STATE_READY    1u
+#define STATE_RUNNING  2u
+#define STATE_ERROR    3u
+#define STATE_STOPPED  4u
+#define TELEMETRY_MAGIC 0x43355232u
+
+static const char *TAG = "c5vrx2_rt";
+
+static bool IRAM_ATTR __attribute__((noinline)) park_hp_until_terminal(void)
+{
+    const uint32_t mie = 0x8u;
+    uint32_t saved_mstatus;
+    bool saw_running = false;
+
+    /* FreeRTOS critical sections leave higher-level CLIC interrupts eligible.
+     * Once LP grants the RF writer HP SRAM, even one such ISR can touch flash,
+     * a driver object or a reassigned SRAM bank. Mask MSTATUS.MIE directly and
+     * make no calls until LP has restored ownership on a terminal state. */
+    __asm__ __volatile__("csrrc %0, mstatus, %1"
+                         : "=r"(saved_mstatus) : "r"(mie) : "memory");
+    ulp_c5vrx2_command = CMD_CONTINUOUS;
+    for (;;) {
+        const uint32_t state = ulp_c5vrx2_state;
+        if (state == STATE_RUNNING) saw_running = true;
+        if (state == STATE_ERROR || state == STATE_STOPPED) break;
+    }
+    if ((saved_mstatus & mie) != 0u) {
+        __asm__ __volatile__("csrs mstatus, %0" :: "r"(mie) : "memory");
+    }
+    return saw_running;
+}
+
+esp_err_t c5vrx2_realtime_start(void)
+{
+    /* LP memory survives an HP software reset. Report the previous run before
+     * loading a fresh LP image; reading this snapshot does not touch the hot
+     * path and is never required to start the next run. */
+    if (ulp_c5vrx2_telemetry_magic == TELEMETRY_MAGIC &&
+        ulp_c5vrx2_rearms != 0u) {
+        const uint32_t rearms = ulp_c5vrx2_rearms;
+        const uint32_t min_cycles = ulp_c5vrx2_gap_cycles_min;
+        const uint32_t avg_cycles = ulp_c5vrx2_gap_cycles_total / rearms;
+        const uint32_t max_cycles = ulp_c5vrx2_gap_cycles_max;
+        ESP_LOGW(TAG,
+                 "PREVIOUS REARM gaps: min=%u cyc/%u ns avg=%u cyc/%u ns max=%u cyc/%u ns rearms=%u failures=%u",
+                 (unsigned)min_cycles, (unsigned)((min_cycles * 125u) / 6u),
+                 (unsigned)avg_cycles, (unsigned)((avg_cycles * 125u) / 6u),
+                 (unsigned)max_cycles, (unsigned)((max_cycles * 125u) / 6u),
+                 (unsigned)rearms, (unsigned)ulp_c5vrx2_rearm_failures);
+    }
+
+    esp_err_t err = ulp_lp_core_load_binary(
+        c5vrx2_lp_bin_start,
+        (size_t)(c5vrx2_lp_bin_end - c5vrx2_lp_bin_start));
+    if (err != ESP_OK) return err;
+
+    const ulp_lp_core_cfg_t lp_cfg = {
+        .wakeup_source = ULP_LP_CORE_WAKEUP_SOURCE_HP_CPU,
+    };
+    err = ulp_lp_core_run((ulp_lp_core_cfg_t *)&lp_cfg);
+    if (err != ESP_OK) return err;
+
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(100u);
+    while (ulp_c5vrx2_state != STATE_READY && xTaskGetTickCount() < deadline)
+        vTaskDelay(1);
+    if (ulp_c5vrx2_state != STATE_READY) return ESP_ERR_TIMEOUT;
+
+    /* LP detects DONE and starts PAU; REGDMA itself executes the four modem
+     * writes. Both masters therefore use the same restricted REE0 domain. */
+    const uint64_t lp_rw =
+        BIT64(APM_TEE_HP_PERIPH_MODEM) |
+        BIT64(APM_TEE_HP_PERIPH_REGDMA) |
+        BIT64(APM_TEE_HP_PERIPH_SYSTEM_REG) |
+        BIT64(APM_TEE_HP_PERIPH_PCR_REG) |
+        BIT64(APM_TEE_HP_PERIPH_PARL_IO);
+    apm_hal_set_master_sec_mode(BIT(APM_MASTER_LPCORE) |
+                                BIT(APM_MASTER_REGDMA),
+                                APM_SEC_MODE_REE0);
+    apm_hal_tee_set_peri_access(APM_TEE_CTRL_HP, lp_rw,
+                                APM_SEC_MODE_REE0, APM_PERM_R | APM_PERM_W);
+
+    /* Point the C5's single REGDMA entry at the four write nodes living in LP
+     * SRAM. Do this before HP SRAM is lent to MAC dump. */
+    err = c5vrx2_regdma_arm(ulp_c5vrx2_regdma_link_root);
+    if (err != ESP_OK) return err;
+
+    /* Mount the looping RF-SRAM -> BitScrambler -> PARLIO transaction while
+     * the RF window is still CPU-owned. Its source clock remains paused. */
+    err = c5vrx2_parlio_direct_prepare();
+    if (err != ESP_OK) return err;
+
+    ESP_LOGW(TAG,
+             "REALTIME ARM: A1 IQ -> REGDMA 16K rearm -> direct phase-delta -> 20MS/s PARLIO; HP parked");
+
+    /* Once LP lends 0x40830000..0x4083ffff to MAC dump, HP must not run normal
+     * scheduler/interrupt code. Healthy realtime service stays parked. */
+    const bool ran = park_hp_until_terminal();
+
+    c5vrx2_parlio_direct_destroy();
+    ESP_LOGE(TAG,
+             "REALTIME STOP state=%u ran=%u blocks=%u rearms=%u failures=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u fault=%u addr=0x%08x pc=0x%08x",
+             (unsigned)ulp_c5vrx2_state, ran ? 1u : 0u,
+             (unsigned)ulp_c5vrx2_blocks,
+             (unsigned)ulp_c5vrx2_rearms,
+             (unsigned)ulp_c5vrx2_rearm_failures,
+             (unsigned)ulp_c5vrx2_gap_cycles_min,
+             (unsigned)(ulp_c5vrx2_rearms != 0u
+                 ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u),
+             (unsigned)ulp_c5vrx2_gap_cycles_last,
+             (unsigned)ulp_c5vrx2_gap_cycles_max,
+             (unsigned)ulp_c5vrx2_fault_cause,
+             (unsigned)ulp_c5vrx2_fault_address,
+             (unsigned)ulp_c5vrx2_fault_pc);
+    return ran ? ESP_FAIL : ESP_ERR_INVALID_STATE;
+}

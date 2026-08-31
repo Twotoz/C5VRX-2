@@ -1,0 +1,37 @@
+# Packed C5 Q10/I10 -> phase8 delta over four input intervals, decimate 4:1.
+# O0..O5 drive the six-resistor DAC; zero deviation is code 20. Selecting
+# accumulator bits 1..6 yields two DAC codes per phase6 step.
+
+cfg prefetch true
+# The 64 KiB input GDMA descriptor is cyclic. Do not terminate/reset the
+# discriminator on its per-block EOF; PARLIO loop mode intentionally has no
+# downstream EOF, so IQ -> phase delta -> DAC remains continuous over rearms.
+cfg eof_on downstream
+cfg trailing_bytes 0
+cfg lut_width_bits 16
+
+init:
+    LDCTDBL 40
+
+sample_address:
+    set 22..26 5..9,
+    set 27..31 15..19,
+    read 32,
+    jmp phase_add
+
+phase_add:
+    set 0..7 L8..L15,
+    set 16..23 L0..L7,
+    read 32,
+    ADDCTIBL
+
+emit_and_remember:
+    set 0..5 B1..B6,
+    set 16..23 O0..O7,
+    read 32,
+    write 8,
+    LDCTIBL
+
+decimate_fourth:
+    read 32,
+    jmp sample_address
