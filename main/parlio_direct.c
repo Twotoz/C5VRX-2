@@ -46,7 +46,7 @@ esp_err_t c5vrx2_parlio_direct_prepare(void)
     parlio_ll_clear_interrupt_status(&PARL_IO, PARLIO_LL_EVENT_TX_FIFO_EMPTY);
 
     const parlio_transmit_config_t tx_cfg = {
-        .idle_value = 14u,
+        .idle_value = 20u,
         .bitscrambler_program = NULL,
         .flags.loop_transmission = true,
     };
