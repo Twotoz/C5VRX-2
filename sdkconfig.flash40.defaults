@@ -1,0 +1,5 @@
+# Conservative flash clock for ESP32-C5 rev1 startup testing.
+# Loaded after the normal sdkconfig snapshot by the dedicated build command.
+# CONFIG_ESPTOOLPY_FLASHFREQ_80M is not set
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+CONFIG_ESPTOOLPY_FLASHFREQ="40m"

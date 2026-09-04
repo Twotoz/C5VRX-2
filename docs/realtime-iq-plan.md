@@ -1,156 +1,66 @@
-# Realtime IQ -> PARLIO contract
+# Realtime IQ to recovered-CVBS contract
 
-## Hardware facts we are preserving
+## Source
 
-1. C5 mode-0 produces packed 32-bit IQ words in the RF dump SRAM at `0x40830000`.
-2. Packed format: Q = signed 10-bit bits 0..9, I = signed 10-bit bits 10..19.
-3. A finite 16,384-word capture succeeds both with VTX OFF and VTX ON. VTX presence changes the signal statistics, not whether IQ words exist.
-4. The finite `adctrig()` wrapper is not a realtime producer. Its whole call includes ownership/poll/teardown overhead around a short RF acquisition.
-5. The proven direct restart sequence can rearm the 16K writer repeatedly; measured hardware boundary evidence in C5VRX issue #22 is far smaller than the whole vendor call.
-
-## Realtime architecture
+The production source is an autonomous, pre-trigger RF dump ring:
 
 ```text
-ESP32-C5 RF frontend @ A1 / 5865 MHz
-              |
-              v
-      RF dump SRAM writer
-              |
-       16K generation boundary
-              |
-      immediate HW rearm
-              |
-              +------------------------------+
-              |                              |
-              v                              v
-      producer continues             consumer reads completed
-        immediately                     generation / safe slice
-                                             |
-                                             v
-                                    Q10/I10 -> phase8
-                                             |
-                                             v
-                                  dphi[n] = phase[n]-phase[n-4]
-                                             |
-                                             v
-                                     fixed gain + bias
-                                             |
-                                             v
-                                         DAC6 byte
-                                             |
-                                             v
-                                          PARLIO
-                                             |
-                                             v
-                                         D4..D9 DAC
+SRAM base   0x40830000
+size        0x10000 bytes
+format      Q10 bits 0..9, I10 bits 10..19
+pointer     0x600a9008[15:0]
+enable      0x600a9004[31]
+length      0x600a9004[16:0]
 ```
 
-Producer and consumer are independent. DSP or PARLIO must never delay RF restart.
+The C5 vendor call `adctrig(16383, 5, 0, 1, 1, 0, 0, 0, 0)` is used only as
+an oracle. Its recovered C5 state selects TX_START with `0x00060000` in the
+new selector field and clears historical control bit 17 for `dump_trig=1`.
+Production reproduces that state directly, selects a trigger that never occurs,
+grants SRAM and sets ENABLE once. It deliberately omits the wrapper's trigger,
+DONE wait, timeout, disable, restore and periodic rearm lifecycle.
 
-## Producer rules
+`continuous_iq_acquire()` returns only physically contiguous spans. Logical
+producer/consumer positions continue through address 16383 -> 0. A missed or
+ambiguous wrap is exposed as a discontinuity; it is never hidden by holding or
+inventing samples.
 
-The producer starts automatically after RF initialization and tune to A1/5865. It does not wait for USB, VTX, PAL/NTSC, sync, burst, video classification, power thresholds or a GUI command.
+## DSP and output
 
-At every 16K boundary, restart must be the first action. No logging, heap allocation, memcpy, hashes, DSP or PARLIO calls are allowed between writer completion and the restart primitive.
-
-First implementation candidate is the already-proven direct sequence:
+For every adjacent pair, including across normal DMA/ring boundaries:
 
 ```text
-ENABLE 0
-ENABLE 1
-START 1
-START 0
+d[n] = arg(x[n] * conj(x[n-1]))
 ```
 
-Then benchmark the smaller evidence-based candidate:
+The streaming C5 implementation uses a compact signed-I/Q LUT approximation in
+the BitScrambler. It processes all adjacent samples, accumulates four real FM
+results, then emits their boxcar average. The host validator keeps the exact
+floating-point conjugate-product reference and reports adjacent, post-filter
+and +/-pi-seam errors so the optimized LUT is never accepted blindly.
 
-```text
-START 1
-START 0
-```
+RF and AV rates are separate state. Startup measures the RF writer cadence;
+PARLIO is configured for one output per four discriminator samples. This first
+hardware implementation is a fixed-ratio real-domain boxcar/decimator. Any
+future arbitrary ratio belongs after FM and must not discard complex IQ first.
 
-with ENABLE continuously high. Adopt it only after physical hardware confirms equal reliability.
+PARLIO hardware loop mode mounts a cyclic GDMA chain once. Its BitScrambler
+state and source address continue over the physical SRAM wrap. No PAL frame,
+framebuffer, finite transaction restart or per-block memory copy exists in the
+live path.
 
-A truly native continuously overwriting ring remains interesting, but must not block the first direct-output experiment. The rearm producer is the current known-good fallback.
+## Realtime and USB rules
 
-## Consumer rules
+- No `vTaskDelay`, allocation, logging or USB operation occurs in RF/DSP pacing.
+- VTX OFF remains valid continuous noise IQ; signal presence never gates RF.
+- Previous-IQ state resets only on a reported real discontinuity or retune.
+- USB remains enabled and scheduled on the HP CPU; a low-priority task samples
+  telemetry once per second.
+- The old MSTATUS interrupt mask, HP parking, LP rearm and 30-second terminal
+  postmortem loop are removed.
 
-The consumer must not allocate or copy a full 64 KiB IQ block for every generation.
+## Proof boundary
 
-Initial implementation should use the smallest safe handoff that can be physically proven. Prefer:
-
-1. direct read from a completed/safe RF SRAM generation;
-2. small fixed chunks into PARLIO DMA buffers;
-3. only if required, a bounded small scratch buffer.
-
-Never add a second giant software IQ ring unless hardware ownership forces it.
-
-## Minimal transform
-
-No PAL/NTSC reconstruction is required for the first hardware proof.
-
-For every fourth IQ sample:
-
-```c
-q = sign10(word);
-i = sign10(word >> 10);
-phase = phase8(i, q);
-delta = (int8_t)(phase - previous_phase);
-dac = clamp6(BIAS + delta * GAIN);
-```
-
-This produces 20 MS/s output from the 80 MS/s represented IQ timebase. The first sample after a missing/unknown generation boundary is neutral/held because discriminator phase across missing RF time is not valid.
-
-Initial `GAIN` and `BIAS` may be fixed constants chosen only to fit the 6-bit DAC safely. Do not run video-analysis or classification to choose them in the realtime path.
-
-## VTX OFF behavior
-
-VTX OFF is a valid operating condition:
-
-```text
-VTX OFF -> noise/spurs/ambient RF -> IQ words -> discriminator noise -> analog static
-```
-
-The producer must continue indefinitely. A signal detector can later observe this stream, but it cannot stop or gate acquisition.
-
-## USB
-
-USB is diagnostics only. Connecting, disconnecting or stopping USB must not start, stop, rearm, reset or retune the RF producer.
-
-Useful bounded counters:
-
-```text
-blocks
-rearms
-rearm_failures
-boundary_cycles_min/avg/max
-parlio_underruns
-consumer_overruns
-```
-
-Do not print in the boundary hot path. Snapshot counters asynchronously.
-
-## First physical acceptance test
-
-1. Boot with VTX OFF.
-2. Confirm producer block/rearm counters increase continuously.
-3. Confirm PARLIO continues outputting a changing RF-dependent waveform/static.
-4. Turn VTX ON without restarting anything.
-5. Confirm the same producer continues and output changes immediately.
-6. Turn VTX OFF again without restarting anything.
-7. Confirm producer continues and output returns to the off-air/noise character.
-8. Confirm `rearm_failures=0` and no USB dependency.
-
-Recognizable PAL/NTSC video is explicitly *not* required for this first gate. The gate proves a continuous RF-dependent hardware datapath.
-
-## Explicitly excluded from this branch
-
-- `NO_RF` producer state
-- PAL/NTSC analyzer in the hot path
-- sync/burst gating
-- full-frame raster reconstruction
-- GUI-driven capture pipeline
-- repeated full vendor `adctrig()` lifecycle per block
-- per-block heap allocations
-- per-block 64 KiB copy before restart
-- USB-controlled RF lifecycle
+Software construction proves neither hidden RF sample continuity nor exact
+PARLIO boundary timing. The required physical proofs are listed in
+`docs/hardware-test.md`.

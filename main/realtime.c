@@ -2,184 +2,154 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_attr.h"
-#include "esp_bit_defs.h"
 #include "esp_log.h"
-#include "hal/apm_hal.h"
-#include "soc/apm_defs.h"
-#include "ulp_lp_core.h"
 
-#include "c5vrx2_lp.h"
+#include "calibration.h"
+#include "continuous_iq.h"
 #include "parlio_direct.h"
-#include "regdma_rearm.h"
+#include "rf_dump.h"
+#include "wifi5.h"
 
-/* ulp_embed_binary() exposes the LP image through linker symbols, matching the
- * proven C5VRX LP-core donor. The generated c5vrx2_lp.h only declares the LP
- * shared variables, not these binary bounds. */
-extern const uint8_t c5vrx2_lp_bin_start[]
-    asm("_binary_c5vrx2_lp_bin_start");
-extern const uint8_t c5vrx2_lp_bin_end[]
-    asm("_binary_c5vrx2_lp_bin_end");
-
-#define CMD_CONTINUOUS 1u
-#define STATE_READY    1u
-#define STATE_RUNNING  2u
-#define STATE_ERROR    3u
-#define STATE_STOPPED  4u
-#define TELEMETRY_MAGIC 0x43355232u
+#define START_LEAD_WORDS      (C5VRX2_RF_WORDS / 2u)
+#define START_TOLERANCE_WORDS 512u
+#define START_TIMEOUT_US      20000u
+#define TELEMETRY_PERIOD_MS   1000u
+#define SUPERVISOR_PERIOD_MS  5u
 
 static const char *TAG = "c5vrx2_rt";
+static volatile uint32_t s_supervisor_faults;
 
-static bool IRAM_ATTR __attribute__((noinline)) park_hp_until_terminal(void)
+static void supervisor_task(void *argument)
 {
-    const uint32_t mie = 0x8u;
-    uint32_t saved_mstatus;
-    bool saw_running = false;
+    (void)argument;
+    uint32_t previous_pointer = UINT32_MAX;
+    unsigned stationary_checks = 0u;
+    bool reported = false;
 
-    /* FreeRTOS critical sections leave higher-level CLIC interrupts eligible.
-     * Once LP grants the RF writer HP SRAM, even one such ISR can touch flash,
-     * a driver object or a reassigned SRAM bank. Mask MSTATUS.MIE directly and
-     * make no calls until LP has restored ownership on a terminal state. */
-    __asm__ __volatile__("csrrc %0, mstatus, %1"
-                         : "=r"(saved_mstatus) : "r"(mie) : "memory");
-    ulp_c5vrx2_command = CMD_CONTINUOUS;
     for (;;) {
-        const uint32_t state = ulp_c5vrx2_state;
-        if (state == STATE_RUNNING) saw_running = true;
-        if (state == STATE_ERROR || state == STATE_STOPPED) break;
+        continuous_iq_stats_t stats;
+        continuous_iq_get_stats(&stats);
+        stationary_checks = stats.writer_pointer == previous_pointer ?
+                            stationary_checks + 1u : 0u;
+        previous_pointer = stats.writer_pointer;
+        const bool healthy =
+            (stats.dump_control & 0x80040000u) == 0x80000000u &&
+            stationary_checks < 2u &&
+            c5vrx2_wifi5_tx_is_quiescent() &&
+            c5vrx2_rf_dump_guards_valid();
+        if (!healthy && !reported) {
+            s_supervisor_faults++;
+            ESP_LOGE(TAG,
+                     "SUPERVISOR FAULT count=%u ctrl=0x%08x ptr=%u "
+                     "stationary=%u tx_quiet=%u guards=%u; no periodic rearm",
+                     (unsigned)s_supervisor_faults,
+                     (unsigned)stats.dump_control,
+                     (unsigned)stats.writer_pointer,
+                     stationary_checks,
+                     c5vrx2_wifi5_tx_is_quiescent(),
+                     c5vrx2_rf_dump_guards_valid());
+            reported = true;
+        } else if (healthy) {
+            reported = false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(SUPERVISOR_PERIOD_MS));
     }
-    if ((saved_mstatus & mie) != 0u) {
-        __asm__ __volatile__("csrs mstatus, %0" :: "r"(mie) : "memory");
+}
+
+static void telemetry_task(void *argument)
+{
+    (void)argument;
+    uint32_t previous_pointer = UINT32_MAX;
+    uint32_t unchanged_reports = 0u;
+
+    for (;;) {
+        continuous_iq_stats_t stats;
+        continuous_iq_get_stats(&stats);
+        if (stats.writer_pointer == previous_pointer)
+            unchanged_reports++;
+        else
+            unchanged_reports = 0u;
+        previous_pointer = stats.writer_pointer;
+
+        ESP_LOGI(TAG,
+                 "LIVE rf_hz=%u av_hz=%u ptr=%u wraps=%u ctrl=0x%08x "
+                 "dump_enable=%u done=%u starts=%u rearms=%u triggers=%u "
+                 "unchanged=%u faults=%u tx_quiet=%u "
+                 "guards=%u overruns=%u ambiguous=%u",
+                 (unsigned)stats.rf_sample_rate_hz,
+                 (unsigned)c5vrx2_parlio_direct_rate_hz(),
+                 (unsigned)stats.writer_pointer,
+                 (unsigned)stats.physical_wraps,
+                 (unsigned)stats.dump_control,
+                 (stats.dump_control & 0x80000000u) != 0u,
+                 (stats.dump_control & 0x00040000u) != 0u,
+                 (unsigned)stats.producer_start_count,
+                 (unsigned)stats.rearm_count,
+                 (unsigned)stats.trigger_count,
+                 (unsigned)unchanged_reports,
+                 (unsigned)s_supervisor_faults,
+                 c5vrx2_wifi5_tx_is_quiescent(),
+                 c5vrx2_rf_dump_guards_valid(),
+                 (unsigned)stats.overruns,
+                 (unsigned)stats.ambiguous_wraps);
+        vTaskDelay(pdMS_TO_TICKS(TELEMETRY_PERIOD_MS));
     }
-    return saw_running;
 }
 
 esp_err_t c5vrx2_realtime_start(void)
 {
-    esp_err_t err = ulp_lp_core_load_binary(
-        c5vrx2_lp_bin_start,
-        (size_t)(c5vrx2_lp_bin_end - c5vrx2_lp_bin_start));
-    if (err != ESP_OK) return err;
+    const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
+    esp_err_t err = continuous_iq_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "continuous IQ start failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
-    const ulp_lp_core_cfg_t lp_cfg = {
-        .wakeup_source = ULP_LP_CORE_WAKEUP_SOURCE_HP_CPU,
-    };
-    err = ulp_lp_core_run((ulp_lp_core_cfg_t *)&lp_cfg);
-    if (err != ESP_OK) return err;
+    const uint32_t rf_rate_hz = continuous_iq_sample_rate_hz();
+    const uint32_t av_rate_hz = (rf_rate_hz + 2u) / 4u;
+    if (rf_rate_hz < 20000000u || rf_rate_hz > 100000000u ||
+        av_rate_hz < 5000000u || av_rate_hz > 25000000u) {
+        ESP_LOGE(TAG, "implausible measured RF cadence: %u Hz",
+                 (unsigned)rf_rate_hz);
+        (void)continuous_iq_stop();
+        return ESP_ERR_INVALID_RESPONSE;
+    }
 
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(100u);
-    while (ulp_c5vrx2_state != STATE_READY && xTaskGetTickCount() < deadline)
-        vTaskDelay(1);
-    if (ulp_c5vrx2_state != STATE_READY) return ESP_ERR_TIMEOUT;
+    err = c5vrx2_parlio_direct_prepare(av_rate_hz);
+    if (err != ESP_OK) {
+        (void)continuous_iq_stop();
+        return err;
+    }
 
-    /* LP detects the physical boundary and starts PAU. REGDMA performs the
-     * four MODEM writes, so both independent masters need the audited REE0
-     * access installed after ulp_lp_core_run() resets LP's identity. */
-    const uint64_t lp_rw =
-        BIT64(APM_TEE_HP_PERIPH_MODEM) |
-        BIT64(APM_TEE_HP_PERIPH_REGDMA) |
-        BIT64(APM_TEE_HP_PERIPH_SYSTEM_REG) |
-        BIT64(APM_TEE_HP_PERIPH_PCR_REG) |
-        BIT64(APM_TEE_HP_PERIPH_PARL_IO);
-    apm_hal_set_master_sec_mode(BIT(APM_MASTER_LPCORE) |
-                                BIT(APM_MASTER_REGDMA),
-                                APM_SEC_MODE_REE0);
-    apm_hal_tee_set_peri_access(APM_TEE_CTRL_HP, lp_rw,
-                                APM_SEC_MODE_REE0, APM_PERM_R | APM_PERM_W);
-
-    /* ESP32-C5 has one always-on REGDMA entry address. Point it at the donor's
-     * four masked WRITE nodes in LP SRAM before HP SRAM changes ownership. */
-    err = c5vrx2_regdma_arm(ulp_c5vrx2_regdma_link_root);
-    if (err != ESP_OK) return err;
-
-    /* Mount the cyclic RF-SRAM -> BitScrambler -> PARLIO transaction while HP
-     * still owns the SRAM. Its source clock stays paused until LP has acquired
-     * a half-block of real IQ lead. */
-    err = c5vrx2_parlio_direct_prepare();
-    if (err != ESP_OK) return err;
+    /* Start cyclic GDMA half a physical ring behind the autonomous writer.
+     * The descriptor and BitScrambler state then loop forever; neither side
+     * is restarted at the 16K address wrap. */
+    err = continuous_iq_wait_base_lead(START_LEAD_WORDS,
+                                       START_TOLERANCE_WORDS,
+                                       START_TIMEOUT_US);
+    if (err == ESP_OK) err = c5vrx2_parlio_direct_start();
+    if (err != ESP_OK) {
+        c5vrx2_parlio_direct_destroy();
+        (void)continuous_iq_stop();
+        return err;
+    }
 
     ESP_LOGW(TAG,
-             "AV TEST ARM: A1 IQ -> REGDMA 16K rearm -> donor-scale phase6 delta -> 20MS/s PARLIO; HP parked");
+             "LIVE START: pre-trigger IQ ring -> adjacent FM -> real 4:1 "
+             "boxcar -> PARLIO loop; rf=%u Hz av=%u Hz pedestal=%u gain=%ux "
+             "polarity=%s; USB remains scheduled",
+             (unsigned)rf_rate_hz, (unsigned)av_rate_hz,
+             cal->pedestal_code, cal->discriminator_gain,
+             cal->polarity == C5VRX2_POLARITY_CURRENT_MINUS_PREVIOUS ?
+                 "current-minus-previous" : "previous-minus-current");
 
-    /* Once LP lends 0x40830000..0x4083ffff to MAC dump, HP must not run normal
-     * scheduler/interrupt code. Healthy realtime service stays parked. */
-    const bool ran = park_hp_until_terminal();
-
-    c5vrx2_parlio_direct_destroy();
-
-    const uint32_t blocks = ulp_c5vrx2_blocks;
-    const uint32_t fill_avg = blocks != 0u
-        ? ulp_c5vrx2_fill_cycles_total / blocks : 0u;
-    const uint32_t gap_avg = ulp_c5vrx2_rearms != 0u
-        ? ulp_c5vrx2_gap_cycles_total / ulp_c5vrx2_rearms : 0u;
-    const uint32_t average_block_source_hz = fill_avg != 0u
-        ? (uint32_t)((16384ull * 48000000ull) / fill_avg) : 0u;
-    const uint32_t active_source_hz = blocks != 0u &&
-                                      ulp_c5vrx2_fill_cycles_min != 0u
-        ? (uint32_t)((16384ull * 48000000ull) /
-                     ulp_c5vrx2_fill_cycles_min) : 0u;
-    const uint32_t effective_source_hz = ulp_c5vrx2_run_cycles != 0u
-        ? (uint32_t)(((uint64_t)ulp_c5vrx2_observed_words * 48000000ull) /
-                     ulp_c5vrx2_run_cycles) : 0u;
-    /* The native USB endpoint is intentionally unavailable while HP is
-     * parked. Repeat the bounded result after SRAM ownership is restored so a
-     * WebSerial terminal opened after re-enumeration can still collect it. */
-    for (unsigned report = 1u; report <= 30u; ++report) {
-        ESP_LOGE(TAG,
-                 "PRODUCER ACTIVITY report=%u/30 state=%u blocks=%u rearms=%u failures=%u words=%u ptr=%u changes=%u pauses=%u resumes=%u pause_active=%u pause_last=%u pause_max=%u run_cyc=%u fill_min=%u fill_avg=%u fill_last=%u fill_max=%u reset_cyc=%u reset_ptr=%u gap_min=%u gap_avg=%u gap_last=%u gap_max=%u advance_ptr=%u active_source_hz=%u average_block_source_hz=%u effective_source_hz=%u fail_reason=%u fail_ctrl=0x%08x fail_ptr_mode=0x%08x start_ctrl=0x%08x pau_conf=0x%08x pau_raw=0x%08x pau_link=0x%08x pau_peri=0x%08x pau_mem=0x%08x pau_timeout=%u pau_flow=%u",
-                 report,
-                 (unsigned)ulp_c5vrx2_state,
-                 (unsigned)blocks,
-                 (unsigned)ulp_c5vrx2_rearms,
-                 (unsigned)ulp_c5vrx2_rearm_failures,
-                 (unsigned)ulp_c5vrx2_observed_words,
-                 (unsigned)ulp_c5vrx2_last_pointer,
-                 (unsigned)ulp_c5vrx2_pointer_changes,
-                 (unsigned)ulp_c5vrx2_activity_pauses,
-                 (unsigned)ulp_c5vrx2_activity_resumes,
-                 (unsigned)ulp_c5vrx2_pause_active,
-                 (unsigned)ulp_c5vrx2_pause_cycles_last,
-                 (unsigned)ulp_c5vrx2_pause_cycles_max,
-                 (unsigned)ulp_c5vrx2_run_cycles,
-                 (unsigned)ulp_c5vrx2_fill_cycles_min,
-                 (unsigned)fill_avg,
-                 (unsigned)ulp_c5vrx2_fill_cycles_last,
-                 (unsigned)ulp_c5vrx2_fill_cycles_max,
-                 (unsigned)ulp_c5vrx2_reset_cycles,
-                 (unsigned)ulp_c5vrx2_reset_pointer,
-                 (unsigned)ulp_c5vrx2_gap_cycles_min,
-                 (unsigned)gap_avg,
-                 (unsigned)ulp_c5vrx2_gap_cycles_last,
-                 (unsigned)ulp_c5vrx2_gap_cycles_max,
-                 (unsigned)ulp_c5vrx2_advance_pointer,
-                 (unsigned)active_source_hz,
-                 (unsigned)average_block_source_hz,
-                 (unsigned)effective_source_hz,
-                 (unsigned)ulp_c5vrx2_fail_reason,
-                 (unsigned)ulp_c5vrx2_fail_control,
-                 (unsigned)ulp_c5vrx2_fail_pointer_mode,
-                 (unsigned)ulp_c5vrx2_start_control,
-                 (unsigned)ulp_c5vrx2_regdma_conf,
-                 (unsigned)ulp_c5vrx2_regdma_int_raw,
-                 (unsigned)ulp_c5vrx2_regdma_current_link,
-                 (unsigned)ulp_c5vrx2_regdma_peri_addr,
-                 (unsigned)ulp_c5vrx2_regdma_mem_addr,
-                 (unsigned)ulp_c5vrx2_regdma_timed_out,
-                 (unsigned)(ulp_c5vrx2_regdma_conf & 0x7u));
-        if (report != 30u) vTaskDelay(pdMS_TO_TICKS(1000u));
+    if (xTaskCreate(telemetry_task, "c5vrx2_diag", 3072u, NULL,
+                    tskIDLE_PRIORITY + 1u, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "telemetry task unavailable; realtime path remains live");
     }
-    ESP_LOGE(TAG,
-             "REALTIME STOP state=%u ran=%u blocks=%u rearms=%u failures=%u words=%u pauses=%u resumes=%u pause_active=%u fault=%u addr=0x%08x pc=0x%08x",
-             (unsigned)ulp_c5vrx2_state, ran ? 1u : 0u,
-             (unsigned)blocks,
-             (unsigned)ulp_c5vrx2_rearms,
-             (unsigned)ulp_c5vrx2_rearm_failures,
-             (unsigned)ulp_c5vrx2_observed_words,
-             (unsigned)ulp_c5vrx2_activity_pauses,
-             (unsigned)ulp_c5vrx2_activity_resumes,
-             (unsigned)ulp_c5vrx2_pause_active,
-             (unsigned)ulp_c5vrx2_fault_cause,
-             (unsigned)ulp_c5vrx2_fault_address,
-             (unsigned)ulp_c5vrx2_fault_pc);
-    return ran ? ESP_FAIL : ESP_ERR_INVALID_STATE;
+    if (xTaskCreate(supervisor_task, "c5vrx2_watch", 2048u, NULL,
+                    tskIDLE_PRIORITY + 2u, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "supervisor unavailable; realtime path remains live");
+    }
+    return ESP_OK;
 }

@@ -1,0 +1,32 @@
+menu "C5VRX-2 firmware mode"
+
+choice C5VRX2_MODE
+    prompt "Boot mode"
+    default C5VRX2_MODE_LIVE
+
+    config C5VRX2_MODE_LIVE
+        bool "Continuous RF IQ to recovered CVBS"
+
+    config C5VRX2_MODE_RF_ORACLE
+        bool "RF vendor pre-trigger oracle"
+
+    config C5VRX2_MODE_RF_WRAP
+        bool "RF physical-wrap phase diagnostic"
+
+    config C5VRX2_MODE_AV_STATIC
+        bool "AV static DAC code"
+
+    config C5VRX2_MODE_AV_PAL_MONO
+        bool "AV synthetic monochrome PAL"
+
+    config C5VRX2_MODE_AV_PAL_COLOR
+        bool "AV synthetic PAL colour bars"
+endchoice
+
+config C5VRX2_AV_STATIC_CODE
+    int "Static DAC code"
+    depends on C5VRX2_MODE_AV_STATIC
+    range 0 63
+    default 18
+
+endmenu

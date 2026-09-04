@@ -1,39 +1,79 @@
-# Packed C5 Q10/I10 -> donor-scale six-bit phase delta, decimate 4:1.
-# O0..O5 drive the six-resistor DAC; zero deviation is code 15.
+# Continuous packed C5 Q10/I10 -> adjacent-sample WBFM -> real 4:1 boxcar.
+#
+# Every input IQ word participates in the discriminator.  O6..O9 persist a
+# compact previous-IQ state across output groups and across the cyclic GDMA
+# descriptor boundary.  Counter A accumulates four signed adjacent phase
+# differences around four times DAC code 20, then A2..A7 perform the real
+# four-sample boxcar/decimation. Calibration offset is carried by the LUT.
 
 cfg prefetch true
-# The 64 KiB input GDMA descriptor is cyclic. Do not terminate/reset the
-# discriminator on its per-block EOF; PARLIO loop mode intentionally has no
-# downstream EOF, so IQ -> phase delta -> DAC remains continuous over rearms.
 cfg eof_on downstream
 cfg trailing_bytes 0
-cfg lut_width_bits 16
+cfg lut_width_bits 8
 
 init:
-    LDCTDBL 15
-
-sample_address:
-    set 22..26 5..9,
-    set 27..31 15..19,
+    # Prime previous-IQ from the first word.  The first group consequently
+    # contains three genuine intervals and one zero transient; no later group
+    # or physical SRAM wrap resets this state.
+    set 6..7 8..9,
+    set 8..9 18..19,
+    set 24..25 8..9,
+    set 26..27 18..19,
+    set 28..29 8..9,
+    set 30..31 18..19,
     read 32,
-    jmp phase_add
+    LDCTDAL 80
 
-phase_add:
-    # Persist current phase itself, then add (bias-current) to the persisted
-    # previous phase.  This is the measured VTX/CVBS polarity:
-    # output = bias + previous_phase - current_phase (modulo 64).
-    set 0..5 L0..L5,
-    set 16..21 L8..L13,
+sample1:
+    set 6..7 8..9,
+    set 8..9 18..19,
+    set 16..17 8..9,
+    set 18..19 18..19,
+    set 24..27 O6..O9,
+    set 28..29 8..9,
+    set 30..31 18..19,
     read 32,
-    ADDCTIBL
+    ADDCTIAL
 
-emit_and_remember:
-    set 0..5 B0..B5,
-    set 16..21 O0..O5,
+sample2:
+    set 6..7 8..9,
+    set 8..9 18..19,
+    set 16..17 8..9,
+    set 18..19 18..19,
+    set 24..27 O6..O9,
+    set 28..29 8..9,
+    set 30..31 18..19,
     read 32,
+    ADDCTIAL
+
+sample3:
+    set 6..7 8..9,
+    set 8..9 18..19,
+    set 16..17 8..9,
+    set 18..19 18..19,
+    set 24..27 O6..O9,
+    set 28..29 8..9,
+    set 30..31 18..19,
+    read 32,
+    ADDCTIAL
+
+sample4:
+    set 6..7 8..9,
+    set 8..9 18..19,
+    set 16..17 8..9,
+    set 18..19 18..19,
+    set 24..27 O6..O9,
+    set 28..29 8..9,
+    set 30..31 18..19,
+    read 32,
+    ADDCTIAL
+
+emit:
+    set 0..5 A2..A7,
+    set 6..9 O6..O9,
+    set 21..31 O21..O31,
     write 8,
-    LDCTIBL
+    LDCTDAL 80
 
-decimate_fourth:
-    read 32,
-    jmp sample_address
+loop:
+    jmp sample1
