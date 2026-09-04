@@ -25,7 +25,7 @@ jobs:
           cp build/c5vrx2-full.bin build/c5vrx2-hardware-test/c5vrx2-iq-fm-idf601-40.bin
           cp docs/hardware-test.md build/c5vrx2-hardware-test/TESTING.md
           cp tools/flasher/index.html build/c5vrx2-hardware-test/flasher.html
-          git rev-parse HEAD > build/c5vrx2-hardware-test/FIRMWARE-COMMIT.txt
+          printf '%s\n' "$GITHUB_SHA" > build/c5vrx2-hardware-test/FIRMWARE-COMMIT.txt
           cd build/c5vrx2-hardware-test
           sha256sum c5vrx2-full.bin > c5vrx2-full.bin.sha256
       - name: Upload hardware-test bundle
