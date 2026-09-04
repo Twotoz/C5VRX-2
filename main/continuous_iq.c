@@ -17,7 +17,7 @@
 #define CTRL_DONE       0x00040000u
 #define CTRL_DUMP_FIRST 0x00020000u
 #define PTR_MASK        0x00003fffu
-#define SELECTOR_MASK   0x00fe0000u
+#define SELECTOR_MASK   0x01fe0000u
 #define TX_START_SELECT 0x00060000u
 
 #define READER_GUARD_WORDS 256u

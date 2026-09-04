@@ -1,5 +1,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "wifi5.h"
 #include "calibration.h"
@@ -7,6 +9,15 @@
 #include "realtime.h"
 
 static const char *TAG = "c5vrx2";
+
+static void report_fatal_forever(const char *stage, esp_err_t err)
+{
+    for (;;) {
+        ESP_LOGE(TAG, "STARTUP STOP stage=%s error=%s; device remains alive",
+                 stage, esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
 
 static esp_err_t init_nvs(void)
 {
@@ -41,7 +52,7 @@ void app_main(void)
     esp_err_t err = init_nvs();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(err));
-        return;
+        report_fatal_forever("nvs", err);
     }
 
     c5vrx2_calibration_load();
@@ -49,7 +60,7 @@ void app_main(void)
     err = c5vrx2_wifi5_start_a1();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "A1 RF init failed: %s", esp_err_to_name(err));
-        return;
+        report_fatal_forever("wifi5_start_a1", err);
     }
 
 #if CONFIG_C5VRX2_MODE_RF_ORACLE
@@ -62,7 +73,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "selected receiver mode failed: %s",
                  esp_err_to_name(err));
-        return;
+        report_fatal_forever("receiver", err);
     }
     ESP_LOGI(TAG, "selected receiver mode completed/started; main task released");
 #endif
