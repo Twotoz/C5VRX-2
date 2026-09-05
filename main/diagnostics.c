@@ -27,8 +27,13 @@
 
 #define RF_WRAP_SOAK_TARGET 10000u
 #define RF_PHASE_WINDOWS      256u
-#define RF_DMA_PROBE_BYTES   2048u
+#define RF_DMA_PROBE_BYTES    256u
 #define RF_DMA_TIMEOUT_US    2000u
+#define RF_BANK_A      0x40830000u
+#define RF_BANK_B      0x40840000u
+#define RF_BANK_WORDS       16384u
+#define RF_BANK_A_SEED 0xa53c0000u
+#define RF_BANK_B_SEED 0x5ac30000u
 
 #define PAL_RATE_HZ          20000000u
 #define PAL_HALF_SAMPLES     640u
@@ -294,10 +299,14 @@ static float phase_step(uint32_t previous, uint32_t current)
     return atan2f((float)cross, (float)dot);
 }
 
-static DMA_ATTR uint8_t s_rf_dma_probe_a[RF_DMA_PROBE_BYTES];
-static DMA_ATTR uint8_t s_rf_dma_probe_b[RF_DMA_PROBE_BYTES];
-static volatile bool s_rf_dma_done_a;
-static volatile bool s_rf_dma_done_b;
+static DMA_ATTR uint8_t s_rf_dma_a0[RF_DMA_PROBE_BYTES];
+static DMA_ATTR uint8_t s_rf_dma_a1[RF_DMA_PROBE_BYTES];
+static DMA_ATTR uint8_t s_rf_dma_b0[RF_DMA_PROBE_BYTES];
+static DMA_ATTR uint8_t s_rf_dma_b1[RF_DMA_PROBE_BYTES];
+static volatile bool s_rf_dma_done_a0;
+static volatile bool s_rf_dma_done_a1;
+static volatile bool s_rf_dma_done_b0;
+static volatile bool s_rf_dma_done_b1;
 
 static bool rf_dma_done(async_memcpy_handle_t handle,
                         async_memcpy_event_t *event, void *argument)
@@ -326,6 +335,29 @@ static esp_err_t rf_dma_copy_wait(async_memcpy_handle_t dma, void *destination,
     return *done ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+static uint32_t rf_bank_seed(uint32_t seed, unsigned word)
+{
+    return seed ^ (0x9e3779b9u * (word + 1u));
+}
+
+static unsigned changed_bytes(const uint8_t *a, const uint8_t *b)
+{
+    unsigned changed = 0u;
+    for (unsigned i = 0; i < RF_DMA_PROBE_BYTES; ++i)
+        changed += a[i] != b[i];
+    return changed;
+}
+
+static uint32_t probe_hash(const uint8_t *data)
+{
+    uint32_t hash = 2166136261u;
+    for (unsigned i = 0; i < RF_DMA_PROBE_BYTES; ++i) {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
 {
     for (unsigned second = 10u; second != 0u; --second) {
@@ -342,8 +374,18 @@ esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
     esp_err_t err = esp_async_memcpy_install_gdma_ahb(&dma_config, &dma);
     if (err != ESP_OK) return err;
 
-    memset(s_rf_dma_probe_a, 0xa5, sizeof(s_rf_dma_probe_a));
-    memset(s_rf_dma_probe_b, 0x5a, sizeof(s_rf_dma_probe_b));
+    volatile uint32_t *bank_a = (volatile uint32_t *)(uintptr_t)RF_BANK_A;
+    volatile uint32_t *bank_b = (volatile uint32_t *)(uintptr_t)RF_BANK_B;
+    for (unsigned i = 0; i < RF_BANK_WORDS; ++i) {
+        bank_a[i] = rf_bank_seed(RF_BANK_A_SEED, i);
+        bank_b[i] = rf_bank_seed(RF_BANK_B_SEED, i);
+    }
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+
+    memset(s_rf_dma_a0, 0xa5, sizeof(s_rf_dma_a0));
+    memset(s_rf_dma_a1, 0xa5, sizeof(s_rf_dma_a1));
+    memset(s_rf_dma_b0, 0x5a, sizeof(s_rf_dma_b0));
+    memset(s_rf_dma_b1, 0x5a, sizeof(s_rf_dma_b1));
     err = continuous_iq_start();
     if (err != ESP_OK) {
         (void)esp_async_memcpy_uninstall(dma);
@@ -353,64 +395,89 @@ esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
     const uint32_t pointer = REG32(DUMP_PTR_MODE) & PTR_MASK;
     uint32_t source_word = (pointer + C5VRX2_RF_WORDS / 2u) & PTR_MASK;
     source_word &= ~((RF_DMA_PROBE_BYTES / sizeof(uint32_t)) - 1u);
-    const void *source = (const void *)(uintptr_t)
-        (C5VRX2_RF_DUMP_BASE + source_word * sizeof(uint32_t));
+    const void *source_a = (const void *)(uintptr_t)
+        (RF_BANK_A + source_word * sizeof(uint32_t));
+    const void *source_b = (const void *)(uintptr_t)
+        (RF_BANK_B + source_word * sizeof(uint32_t));
 
-    uint32_t first_us = 0u;
-    uint32_t second_us = 0u;
-    const esp_err_t first_err =
-        rf_dma_copy_wait(dma, s_rf_dma_probe_a, source, &s_rf_dma_done_a,
-                         &first_us);
+    uint32_t a0_us = 0u, a1_us = 0u, b0_us = 0u, b1_us = 0u;
+    const esp_err_t a0_err =
+        rf_dma_copy_wait(dma, s_rf_dma_a0, source_a, &s_rf_dma_done_a0,
+                         &a0_us);
+    const esp_err_t b0_err =
+        rf_dma_copy_wait(dma, s_rf_dma_b0, source_b, &s_rf_dma_done_b0,
+                         &b0_us);
     /* At ~80 MS/s this exceeds one 16K traversal, so the same physical
      * address should contain a later RF generation. */
     const int64_t wait_begin = esp_timer_get_time();
     while ((uint32_t)(esp_timer_get_time() - wait_begin) < 300u) {
         __asm__ __volatile__("nop");
     }
-    const esp_err_t second_err = first_err == ESP_OK
-        ? rf_dma_copy_wait(dma, s_rf_dma_probe_b, source, &s_rf_dma_done_b,
-                           &second_us)
+    const esp_err_t a1_err = a0_err == ESP_OK
+        ? rf_dma_copy_wait(dma, s_rf_dma_a1, source_a, &s_rf_dma_done_a1,
+                           &a1_us)
+        : ESP_ERR_INVALID_STATE;
+    const esp_err_t b1_err = b0_err == ESP_OK
+        ? rf_dma_copy_wait(dma, s_rf_dma_b1, source_b, &s_rf_dma_done_b1,
+                           &b1_us)
         : ESP_ERR_INVALID_STATE;
 
     continuous_iq_stats_t stats;
     continuous_iq_get_stats(&stats);
     const esp_err_t stop_err = continuous_iq_stop();
 
-    unsigned nonzero_a = 0u;
-    unsigned nonzero_b = 0u;
-    unsigned changed_between = 0u;
-    for (unsigned i = 0; i < RF_DMA_PROBE_BYTES; ++i) {
-        nonzero_a += s_rf_dma_probe_a[i] != 0u;
-        nonzero_b += s_rf_dma_probe_b[i] != 0u;
-        changed_between += s_rf_dma_probe_a[i] != s_rf_dma_probe_b[i];
+    unsigned overwritten_a = 0u;
+    unsigned overwritten_b = 0u;
+    for (unsigned i = 0; i < RF_BANK_WORDS; ++i) {
+        overwritten_a += bank_a[i] != rf_bank_seed(RF_BANK_A_SEED, i);
+        overwritten_b += bank_b[i] != rf_bank_seed(RF_BANK_B_SEED, i);
     }
-    const bool visible = first_err == ESP_OK && second_err == ESP_OK &&
-                         nonzero_a != 0u && nonzero_b != 0u &&
-                         changed_between != 0u;
-    c5vrx2_trace_stage_detail(201u, first_err, first_us, 0u, 0u);
-    c5vrx2_trace_stage_detail(202u, second_err, second_us, 0u, 0u);
-    c5vrx2_trace_stage_detail(203u,
-                              visible ? ESP_OK : ESP_ERR_NOT_SUPPORTED,
-                              nonzero_a, nonzero_b, changed_between);
+    const unsigned live_changed_a = changed_bytes(s_rf_dma_a0, s_rf_dma_a1);
+    const unsigned live_changed_b = changed_bytes(s_rf_dma_b0, s_rf_dma_b1);
+    const bool visible_a = a0_err == ESP_OK && a1_err == ESP_OK &&
+                           live_changed_a != 0u;
+    const bool visible_b = b0_err == ESP_OK && b1_err == ESP_OK &&
+                           live_changed_b != 0u;
+    const bool guards_after_stop = c5vrx2_rf_dump_guards_valid();
+    c5vrx2_trace_stage_detail(201u, a0_err, a0_us, 0u, 0u);
+    c5vrx2_trace_stage_detail(202u, b0_err, b0_us, 0u, 0u);
+    c5vrx2_trace_stage_detail(203u, a1_err, a1_us, 0u, 0u);
+    c5vrx2_trace_stage_detail(204u, b1_err, b1_us, 0u, 0u);
+    c5vrx2_trace_stage_detail(205u,
+                              visible_a ? ESP_OK : ESP_ERR_NOT_SUPPORTED,
+                              live_changed_a, probe_hash(s_rf_dma_a0),
+                              probe_hash(s_rf_dma_a1));
+    c5vrx2_trace_stage_detail(206u,
+                              visible_b ? ESP_OK : ESP_ERR_NOT_SUPPORTED,
+                              live_changed_b, probe_hash(s_rf_dma_b0),
+                              probe_hash(s_rf_dma_b1));
+    c5vrx2_trace_stage_detail(207u, stop_err, overwritten_a, overwritten_b,
+                              guards_after_stop);
     for (unsigned report = 1u; report <= 30u; ++report) {
         ESP_LOGW(TAG,
-                 "RF DMA VISIBILITY report=%u/30 src_word=%u first=%s/%uus "
-                 "second=%s/%uus nonzero_a=%u nonzero_b=%u changed=%u "
+                 "RF BANK VISIBILITY report=%u/30 src_word=%u "
+                 "A=%s/%uus,%s/%uus live=%u overwritten=%u "
+                 "B=%s/%uus,%s/%uus live=%u overwritten=%u "
                  "ptr=%u ctrl=0x%08x starts=%u rearms=%u triggers=%u "
-                 "stop=%s verdict=%s",
-                 report, (unsigned)source_word, esp_err_to_name(first_err),
-                 (unsigned)first_us, esp_err_to_name(second_err),
-                 (unsigned)second_us, nonzero_a, nonzero_b, changed_between,
+                 "stop=%s guards=%u verdict=%s",
+                 report, (unsigned)source_word,
+                 esp_err_to_name(a0_err), (unsigned)a0_us,
+                 esp_err_to_name(a1_err), (unsigned)a1_us,
+                 live_changed_a, overwritten_a,
+                 esp_err_to_name(b0_err), (unsigned)b0_us,
+                 esp_err_to_name(b1_err), (unsigned)b1_us,
+                 live_changed_b, overwritten_b,
                  (unsigned)stats.writer_pointer, (unsigned)stats.dump_control,
                  (unsigned)stats.producer_start_count,
                  (unsigned)stats.rearm_count, (unsigned)stats.trigger_count,
-                 esp_err_to_name(stop_err),
-                 visible ? "GDMA_CAN_READ_MAC_RING" : "GDMA_VIEW_BLOCKED");
+                 esp_err_to_name(stop_err), guards_after_stop,
+                 visible_a ? "BANK_A_LIVE" :
+                 visible_b ? "BANK_B_LIVE" : "BOTH_LIVE_VIEWS_BLOCKED");
         vTaskDelay(pdMS_TO_TICKS(1000u));
     }
 
     const esp_err_t uninstall_err = esp_async_memcpy_uninstall(dma);
-    if (!visible) return ESP_ERR_NOT_SUPPORTED;
+    if (!visible_a && !visible_b) return ESP_ERR_NOT_SUPPORTED;
     if (stop_err != ESP_OK) return stop_err;
     return uninstall_err;
 }

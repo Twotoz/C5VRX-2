@@ -75,6 +75,27 @@ within-run changes nevertheless proves that ordinary AHB-GDMA sees the same
 stale/non-live HP-domain view as direct CPU reads. Directly DMA-reading the
 MAC-owned ring is therefore not the missing simultaneous-access mechanism.
 
+A follow-up two-bank probe filled both candidate windows with distinct known
+patterns before arming the same `SRAM_USAGE=2`, `MAC_DUMP_ALLOC=1` producer.
+It copied both windows twice through AHB-GDMA while the writer ran, then
+stopped the writer, restored CPU ownership and inspected the physical SRAM:
+
+```text
+RF rate                      = 79.959 MS/s
+producer starts/rearms/trigs = 1 / 0 / 0
+live GDMA changes, 0x40830000 = 0 / 256 bytes
+live GDMA changes, 0x40840000 = 0 / 256 bytes
+post-stop overwritten words, 0x40830000 = 16384 / 16384
+post-stop overwritten words, 0x40840000 = 0 / 16384
+guards intact                = yes
+```
+
+This physically locates the IQ dump at `0x40830000`; applying an additional
+64-KiB address offset in the consumer would be wrong. `0x40840000` is not a
+live alternate view. Both normal AHB views remain static while MAC ownership
+is active, even though bank A contains the completed IQ ring immediately after
+ownership is restored.
+
 ## Claims deliberately not made yet
 
 - No claim of sample-gapless RF time across `16383 -> 0` is made yet.
