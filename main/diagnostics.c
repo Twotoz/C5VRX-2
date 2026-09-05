@@ -8,6 +8,8 @@
 
 #include "driver/gpio.h"
 #include "driver/parlio_tx.h"
+#include "esp_async_memcpy.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -16,6 +18,7 @@
 
 #include "continuous_iq.h"
 #include "rf_dump.h"
+#include "startup_trace.h"
 
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define DUMP_CTRL     0x600a9004u
@@ -24,6 +27,8 @@
 
 #define RF_WRAP_SOAK_TARGET 10000u
 #define RF_PHASE_WINDOWS      256u
+#define RF_DMA_PROBE_BYTES   2048u
+#define RF_DMA_TIMEOUT_US    2000u
 
 #define PAL_RATE_HZ          20000000u
 #define PAL_HALF_SAMPLES     640u
@@ -287,6 +292,127 @@ static float phase_step(uint32_t previous, uint32_t current)
     const int32_t dot = ci * pi + cq * pq;
     const int32_t cross = cq * pi - ci * pq;
     return atan2f((float)cross, (float)dot);
+}
+
+static DMA_ATTR uint8_t s_rf_dma_probe_a[RF_DMA_PROBE_BYTES];
+static DMA_ATTR uint8_t s_rf_dma_probe_b[RF_DMA_PROBE_BYTES];
+static volatile bool s_rf_dma_done_a;
+static volatile bool s_rf_dma_done_b;
+
+static bool rf_dma_done(async_memcpy_handle_t handle,
+                        async_memcpy_event_t *event, void *argument)
+{
+    (void)handle;
+    (void)event;
+    *(volatile bool *)argument = true;
+    return false;
+}
+
+static esp_err_t rf_dma_copy_wait(async_memcpy_handle_t dma, void *destination,
+                                  const void *source, volatile bool *done,
+                                  uint32_t *elapsed_us)
+{
+    *done = false;
+    const int64_t begin = esp_timer_get_time();
+    esp_err_t err = esp_async_memcpy(dma, destination, (void *)source,
+                                     RF_DMA_PROBE_BYTES, rf_dma_done,
+                                     (void *)done);
+    if (err != ESP_OK) return err;
+    while (!*done &&
+           (uint32_t)(esp_timer_get_time() - begin) < RF_DMA_TIMEOUT_US) {
+        __asm__ __volatile__("nop");
+    }
+    *elapsed_us = (uint32_t)(esp_timer_get_time() - begin);
+    return *done ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
+{
+    for (unsigned second = 10u; second != 0u; --second) {
+        ESP_LOGW(TAG, "RF DMA diagnostic starts in %u seconds (USB settle)",
+                 second);
+        vTaskDelay(pdMS_TO_TICKS(1000u));
+    }
+
+    async_memcpy_handle_t dma = NULL;
+    async_memcpy_config_t dma_config = ASYNC_MEMCPY_DEFAULT_CONFIG();
+    dma_config.backlog = 2u;
+    dma_config.weight = 1u;
+    dma_config.dma_burst_size = 32u;
+    esp_err_t err = esp_async_memcpy_install_gdma_ahb(&dma_config, &dma);
+    if (err != ESP_OK) return err;
+
+    memset(s_rf_dma_probe_a, 0xa5, sizeof(s_rf_dma_probe_a));
+    memset(s_rf_dma_probe_b, 0x5a, sizeof(s_rf_dma_probe_b));
+    err = continuous_iq_start();
+    if (err != ESP_OK) {
+        (void)esp_async_memcpy_uninstall(dma);
+        return err;
+    }
+
+    const uint32_t pointer = REG32(DUMP_PTR_MODE) & PTR_MASK;
+    uint32_t source_word = (pointer + C5VRX2_RF_WORDS / 2u) & PTR_MASK;
+    source_word &= ~((RF_DMA_PROBE_BYTES / sizeof(uint32_t)) - 1u);
+    const void *source = (const void *)(uintptr_t)
+        (C5VRX2_RF_DUMP_BASE + source_word * sizeof(uint32_t));
+
+    uint32_t first_us = 0u;
+    uint32_t second_us = 0u;
+    const esp_err_t first_err =
+        rf_dma_copy_wait(dma, s_rf_dma_probe_a, source, &s_rf_dma_done_a,
+                         &first_us);
+    /* At ~80 MS/s this exceeds one 16K traversal, so the same physical
+     * address should contain a later RF generation. */
+    const int64_t wait_begin = esp_timer_get_time();
+    while ((uint32_t)(esp_timer_get_time() - wait_begin) < 300u) {
+        __asm__ __volatile__("nop");
+    }
+    const esp_err_t second_err = first_err == ESP_OK
+        ? rf_dma_copy_wait(dma, s_rf_dma_probe_b, source, &s_rf_dma_done_b,
+                           &second_us)
+        : ESP_ERR_INVALID_STATE;
+
+    continuous_iq_stats_t stats;
+    continuous_iq_get_stats(&stats);
+    const esp_err_t stop_err = continuous_iq_stop();
+
+    unsigned nonzero_a = 0u;
+    unsigned nonzero_b = 0u;
+    unsigned changed_between = 0u;
+    for (unsigned i = 0; i < RF_DMA_PROBE_BYTES; ++i) {
+        nonzero_a += s_rf_dma_probe_a[i] != 0u;
+        nonzero_b += s_rf_dma_probe_b[i] != 0u;
+        changed_between += s_rf_dma_probe_a[i] != s_rf_dma_probe_b[i];
+    }
+    const bool visible = first_err == ESP_OK && second_err == ESP_OK &&
+                         nonzero_a != 0u && nonzero_b != 0u &&
+                         changed_between != 0u;
+    c5vrx2_trace_stage_detail(201u, first_err, first_us, 0u, 0u);
+    c5vrx2_trace_stage_detail(202u, second_err, second_us, 0u, 0u);
+    c5vrx2_trace_stage_detail(203u,
+                              visible ? ESP_OK : ESP_ERR_NOT_SUPPORTED,
+                              nonzero_a, nonzero_b, changed_between);
+    for (unsigned report = 1u; report <= 30u; ++report) {
+        ESP_LOGW(TAG,
+                 "RF DMA VISIBILITY report=%u/30 src_word=%u first=%s/%uus "
+                 "second=%s/%uus nonzero_a=%u nonzero_b=%u changed=%u "
+                 "ptr=%u ctrl=0x%08x starts=%u rearms=%u triggers=%u "
+                 "stop=%s verdict=%s",
+                 report, (unsigned)source_word, esp_err_to_name(first_err),
+                 (unsigned)first_us, esp_err_to_name(second_err),
+                 (unsigned)second_us, nonzero_a, nonzero_b, changed_between,
+                 (unsigned)stats.writer_pointer, (unsigned)stats.dump_control,
+                 (unsigned)stats.producer_start_count,
+                 (unsigned)stats.rearm_count, (unsigned)stats.trigger_count,
+                 esp_err_to_name(stop_err),
+                 visible ? "GDMA_CAN_READ_MAC_RING" : "GDMA_VIEW_BLOCKED");
+        vTaskDelay(pdMS_TO_TICKS(1000u));
+    }
+
+    const esp_err_t uninstall_err = esp_async_memcpy_uninstall(dma);
+    if (!visible) return ESP_ERR_NOT_SUPPORTED;
+    if (stop_err != ESP_OK) return stop_err;
+    return uninstall_err;
 }
 
 esp_err_t c5vrx2_rf_wrap_diagnostic_run(void)

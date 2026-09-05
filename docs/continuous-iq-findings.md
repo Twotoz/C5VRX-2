@@ -58,6 +58,23 @@ configuration is not yet a usable simultaneous MAC-write/HP-read mapping.
 shared/arbitrated ownership configuration or another live-readable path is
 physically demonstrated.
 
+An AHB-GDMA visibility probe then copied the same 2-KiB physical RF-ring
+window twice, 300 us apart, while the autonomous writer remained enabled. At
+the measured 79.97 MS/s the writer traversed the 16K ring several times during
+the probe. Both DMA operations completed successfully, but the snapshots were
+byte-for-byte identical:
+
+```text
+VTX off: nonzero A=512, nonzero B=512, changed=0
+VTX on:  nonzero A=256, nonzero B=256, changed=0
+```
+
+The different static occupancy with and without the VTX shows that the mapped
+contents are not simply an untouched destination pattern. The absence of any
+within-run changes nevertheless proves that ordinary AHB-GDMA sees the same
+stale/non-live HP-domain view as direct CPU reads. Directly DMA-reading the
+MAC-owned ring is therefore not the missing simultaneous-access mechanism.
+
 ## Claims deliberately not made yet
 
 - No claim of sample-gapless RF time across `16383 -> 0` is made yet.

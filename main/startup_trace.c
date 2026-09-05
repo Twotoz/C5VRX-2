@@ -52,6 +52,13 @@ void c5vrx2_trace_begin(void)
 
 void c5vrx2_trace_stage(uint32_t stage, esp_err_t error)
 {
+    c5vrx2_trace_stage_detail(stage, error, 0u, 0u, 0u);
+}
+
+void c5vrx2_trace_stage_detail(uint32_t stage, esp_err_t error,
+                               uint32_t detail0, uint32_t detail1,
+                               uint32_t detail2)
+{
     if (!s_partition ||
         (s_sequence + 1u) * sizeof(trace_record_t) > s_partition->size)
         return;
@@ -74,6 +81,7 @@ void c5vrx2_trace_stage(uint32_t stage, esp_err_t error)
         .producer_starts = stats.producer_start_count,
         .physical_wraps = stats.physical_wraps,
         .trigger_count = stats.trigger_count,
+        .reserved = {detail0, detail1, detail2},
     };
     if (esp_partition_write(s_partition,
                             s_sequence * sizeof(trace_record_t),
