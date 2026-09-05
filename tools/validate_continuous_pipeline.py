@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 RING_WORDS = 16384
 TAU = 2.0 * math.pi
 PHASE8 = 256.0 / TAU
-CENTERS = (127.5, 383.5, -384.5, -128.5)
 
 
 def wrap_phase(value: float) -> float:
@@ -23,14 +22,24 @@ def exact_step(previous: complex, current: complex) -> float:
     return math.atan2(product.imag, product.real)
 
 
-def compact_phase(sample: complex) -> float:
+def bucket_center(code: int, bits: int) -> float:
+    width = 1 << (10 - bits)
+    center = code * width + (width - 1) * 0.5
+    return center - 1024.0 if center >= 512.0 else center
+
+
+def compact_phase(sample: complex, q_fine: bool) -> float:
     i = max(-512, min(511, round(sample.real))) & 0x3FF
     q = max(-512, min(511, round(sample.imag))) & 0x3FF
-    return math.atan2(CENTERS[q >> 8], CENTERS[i >> 8])
+    q_bits, i_bits = (3, 2) if q_fine else (2, 3)
+    return math.atan2(bucket_center(q >> (10 - q_bits), q_bits),
+                      bucket_center(i >> (10 - i_bits), i_bits))
 
 
-def optimized_step(previous: complex, current: complex) -> int:
-    delta = wrap_phase(compact_phase(current) - compact_phase(previous))
+def optimized_step(previous: complex, current: complex,
+                   current_q_fine: bool) -> int:
+    delta = wrap_phase(compact_phase(current, current_q_fine) -
+                       compact_phase(previous, not current_q_fine))
     return max(-128, min(127, round(delta * PHASE8)))
 
 
@@ -64,7 +73,9 @@ def discriminate(samples: list[complex], split_points: set[int]) -> list[int]:
         # A software/ring span boundary intentionally does not reset previous.
         if index in split_points:
             pass
-        contribution = 0 if previous is None else optimized_step(previous, sample)
+        current_q_fine = (index & 1) != 0
+        contribution = 0 if previous is None else optimized_step(
+            previous, sample, current_q_fine)
         previous = sample
         contribution = max(-20, min(43, contribution * 2))
         group.append(contribution)
@@ -82,7 +93,8 @@ def error_metrics(samples: list[complex]) -> tuple[float, float, float, float]:
     optimized_group: list[int] = []
     for index in range(1, len(samples)):
         exact = reference_step(samples[index - 1], samples[index])
-        optimized = optimized_step(samples[index - 1], samples[index])
+        optimized = optimized_step(samples[index - 1], samples[index],
+                                   (index & 1) != 0)
         error = optimized - exact
         adjacent_errors.append(error)
         if abs(math.atan2(samples[index].imag, samples[index].real)) > 3.0:
@@ -104,7 +116,8 @@ def verify_sources() -> None:
     source = (ROOT / "main/continuous_iq.c").read_text()
     parlio = (ROOT / "main/parlio_direct.c").read_text()
     assert asm.count("ADDCTIAL") == 4
-    assert "O6..O9" in asm and "set 0..5 A2..A7" in asm
+    assert "O6..O10" in asm and "set 0..5 A2..A7" in asm
+    assert "set 31 L" in asm and "set 31 H" in asm
     assert "adctrig(" not in source
     assert "CTRL_START" in source and "control | CTRL_ENABLE" in source
     assert "CTRL_START;" not in source

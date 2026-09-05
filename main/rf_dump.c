@@ -18,13 +18,15 @@
 #define CTRL_ENABLE    0x80000000u
 
 #define PRE_GUARD_ADDR  0x4082ffc0u
-#define POST_GUARD_ADDR 0x40840000u
-#define POST_GUARD_END  0x40840040u
+#define POST_GUARD_ADDR 0x40850000u
+#define POST_GUARD_END  0x40850040u
 #define GUARD_WORDS     16u
 #define GUARD_SEED      0xc5a55a2cu
 
-/* The C5 RF-test writer targets this fixed internal SRAM window. Never let the
- * normal heap place a task stack/DMA buffer there. */
+/* MAC_DUMP_ALLOC hands the MAC both 64 KiB SRAM banks beginning at
+ * 0x40830000, even though ordinary IQ words occupy only the first bank.
+ * Reserving merely through 0x40840000 lets Wi-Fi/USB/task allocations land in
+ * the second bank and causes an immediate CPU lockup at the ownership write. */
 SOC_RESERVE_MEMORY_REGION(PRE_GUARD_ADDR, POST_GUARD_END, c5vrx2_rf_dump_ram);
 extern char _bss_end;
 

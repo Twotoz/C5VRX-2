@@ -5,6 +5,7 @@
 #include "esp_timer.h"
 
 #include "wifi5.h"
+#include "startup_trace.h"
 
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 
@@ -142,25 +143,32 @@ static esp_err_t measure_rate(void)
 
 esp_err_t continuous_iq_start(void)
 {
+    c5vrx2_trace_stage(101u, ESP_OK);
     if (s_iq.running) return ESP_ERR_INVALID_STATE;
     if (!c5vrx2_rf_dump_memory_reserved()) return ESP_ERR_INVALID_STATE;
+    c5vrx2_trace_stage(102u, ESP_OK);
 
     esp_err_t err = c5vrx2_rf_dump_prepare_mode0();
     if (err != ESP_OK) return err;
+    c5vrx2_trace_stage(103u, ESP_OK);
 
     memset(&s_iq, 0, sizeof(s_iq));
     s_iq.next_span_continuous = false;
     c5vrx2_rf_dump_guards_init();
+    c5vrx2_trace_stage(104u, ESP_OK);
 
-    /* Exact C5 vendor-oracle state for trigmode=TX_START (5): clear the
-     * evolved selector field and select 0x00060000.  For dump_trig=1 this C5
-     * implementation clears, rather than sets, historical bit 17. */
+    /* C5 trigmode=TX_START (5) selects 0x00060000 in PTR_MODE.  The C5
+     * v6.0.1 vendor routine ignores its historical dump_trig argument, so it
+     * cannot itself expose a dump-first TX_START combination.  Preserve the
+     * verified TX_START selector and explicitly request the historical
+     * pre-trigger state with CTRL_DUMP_FIRST; no software START is issued. */
     uint32_t selector = REG32(DUMP_PTR_MODE);
     selector = (selector & ~SELECTOR_MASK) | TX_START_SELECT;
     REG32(DUMP_PTR_MODE) = selector;
 
     uint32_t control = REG32(DUMP_CTRL);
-    control &= ~(CTRL_ENABLE | CTRL_START | CTRL_DONE | CTRL_DUMP_FIRST);
+    control &= ~(CTRL_ENABLE | CTRL_START | CTRL_DONE);
+    control |= CTRL_DUMP_FIRST;
     control = (control & ~0x0001ffffu) | C5VRX2_RF_WORDS;
     REG32(DUMP_CTRL) = control;
 
@@ -170,6 +178,7 @@ esp_err_t continuous_iq_start(void)
     REG32(HP_SRAM_USAGE) =
         (s_iq.saved_sram_usage & 0xfffef0ffu) | 0x00010200u;
     fence_io();
+    c5vrx2_trace_stage(105u, ESP_OK);
 
     /* wifi5_start_a1() keeps PHY/RX and the 5 GHz tune alive. Re-apply its
      * one-shot LMAC TX gate immediately before arming, so TX_START cannot
@@ -179,6 +188,7 @@ esp_err_t continuous_iq_start(void)
         REG32(HP_SRAM_USAGE) = s_iq.saved_sram_usage;
         return err;
     }
+    c5vrx2_trace_stage(106u, ESP_OK);
 
     /* DUMP FIRST + never-occurring TX_START starts by ENABLE only.  A START
      * pulse here would select the finite software-trigger lifecycle again. */
@@ -188,12 +198,16 @@ esp_err_t continuous_iq_start(void)
     s_iq.producer_start_count = 1u;
     s_iq.last_pointer = writer_pointer();
     s_iq.last_poll_us = esp_timer_get_time();
+    c5vrx2_trace_stage(107u, ESP_OK);
 
+    c5vrx2_trace_stage(108u, ESP_OK);
     err = measure_rate();
     if (err != ESP_OK) {
+        c5vrx2_trace_stage(108u, err);
         (void)continuous_iq_stop();
         return err;
     }
+    c5vrx2_trace_stage(109u, ESP_OK);
     const esp_timer_create_args_t observer_args = {
         .callback = observe_producer,
         .name = "iq_ptr",
@@ -206,6 +220,7 @@ esp_err_t continuous_iq_start(void)
         (void)continuous_iq_stop();
         return err;
     }
+    c5vrx2_trace_stage(110u, ESP_OK);
     return ESP_OK;
 }
 

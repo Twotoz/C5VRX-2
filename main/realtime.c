@@ -8,6 +8,7 @@
 #include "continuous_iq.h"
 #include "parlio_direct.h"
 #include "rf_dump.h"
+#include "startup_trace.h"
 #include "wifi5.h"
 
 #define START_LEAD_WORDS      (C5VRX2_RF_WORDS / 2u)
@@ -99,11 +100,14 @@ static void telemetry_task(void *argument)
 esp_err_t c5vrx2_realtime_start(void)
 {
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
+    c5vrx2_trace_stage(10u, ESP_OK);
     esp_err_t err = continuous_iq_start();
     if (err != ESP_OK) {
+        c5vrx2_trace_stage(10u, err);
         ESP_LOGE(TAG, "continuous IQ start failed: %s", esp_err_to_name(err));
         return err;
     }
+    c5vrx2_trace_stage(11u, ESP_OK);
 
     const uint32_t rf_rate_hz = continuous_iq_sample_rate_hz();
     const uint32_t av_rate_hz = (rf_rate_hz + 2u) / 4u;
@@ -111,15 +115,19 @@ esp_err_t c5vrx2_realtime_start(void)
         av_rate_hz < 5000000u || av_rate_hz > 25000000u) {
         ESP_LOGE(TAG, "implausible measured RF cadence: %u Hz",
                  (unsigned)rf_rate_hz);
+        c5vrx2_trace_stage(12u, ESP_ERR_INVALID_RESPONSE);
         (void)continuous_iq_stop();
         return ESP_ERR_INVALID_RESPONSE;
     }
+    c5vrx2_trace_stage(12u, ESP_OK);
 
     err = c5vrx2_parlio_direct_prepare(av_rate_hz);
     if (err != ESP_OK) {
+        c5vrx2_trace_stage(13u, err);
         (void)continuous_iq_stop();
         return err;
     }
+    c5vrx2_trace_stage(13u, ESP_OK);
 
     /* Start cyclic GDMA half a physical ring behind the autonomous writer.
      * The descriptor and BitScrambler state then loop forever; neither side
@@ -127,7 +135,12 @@ esp_err_t c5vrx2_realtime_start(void)
     err = continuous_iq_wait_base_lead(START_LEAD_WORDS,
                                        START_TOLERANCE_WORDS,
                                        START_TIMEOUT_US);
-    if (err == ESP_OK) err = c5vrx2_parlio_direct_start();
+    c5vrx2_trace_stage(14u, err);
+    if (err == ESP_OK) {
+        c5vrx2_trace_stage(15u, ESP_OK);
+        err = c5vrx2_parlio_direct_start();
+        c5vrx2_trace_stage(16u, err);
+    }
     if (err != ESP_OK) {
         c5vrx2_parlio_direct_destroy();
         (void)continuous_iq_stop();

@@ -16,25 +16,35 @@ BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_direct6_4to1_program,
 #define LUT_BYTES 2048u
 #define PI_F 3.14159265358979323846f
 
-/* Top-two-bit Q/I quantization keeps the complete adjacent-sample operation
- * in one 8-bit LUT lookup.  The LUT address is current[3:0], previous[3:0],
- * plus three replicated don't-care address bits. */
-static float signed2_center(unsigned code)
+/* An 8-bit LUT has an 11-bit address on C5.  Use five bits for each IQ
+ * point and the last bit to alternate Q3/I2 and Q2/I3 quantizers.  That
+ * doubles the Cartesian phase states from the old 2+2 implementation while
+ * keeping both the current and previous sample in every adjacent lookup.
+ * Alternating the finer axis avoids permanently favouring I or Q. */
+static float signed_bucket_center(unsigned code, unsigned bits)
 {
-    static const float centers[4] = {127.5f, 383.5f, -384.5f, -128.5f};
-    return centers[code & 3u];
+    const unsigned width = 1u << (10u - bits);
+    float center = (float)(code * width) + ((float)width - 1.0f) * 0.5f;
+    if (center >= 512.0f) center -= 1024.0f;
+    return center;
 }
 
-static float compact_phase(unsigned compact)
+static float compact_phase(unsigned compact, bool q_fine)
 {
-    const float q = signed2_center(compact & 3u);
-    const float i = signed2_center((compact >> 2u) & 3u);
+    const unsigned q_bits = q_fine ? 3u : 2u;
+    const unsigned i_bits = q_fine ? 2u : 3u;
+    const unsigned q_mask = (1u << q_bits) - 1u;
+    const float q = signed_bucket_center(compact & q_mask, q_bits);
+    const float i = signed_bucket_center(compact >> q_bits, i_bits);
     return atan2f(q, i);
 }
 
-static int adjacent_delta(unsigned previous, unsigned current)
+static int adjacent_delta(unsigned previous, unsigned current,
+                          bool current_q_fine)
 {
-    float delta = compact_phase(current) - compact_phase(previous);
+    /* Consecutive samples use opposite mappings. */
+    float delta = compact_phase(current, current_q_fine) -
+                  compact_phase(previous, !current_q_fine);
     while (delta >= PI_F) delta -= 2.0f * PI_F;
     while (delta < -PI_F) delta += 2.0f * PI_F;
     int phase8 = (int)lrintf(delta * (256.0f / (2.0f * PI_F)));
@@ -48,70 +58,52 @@ static void build_adjacent_lut(uint8_t lut[LUT_BYTES])
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
     const int pedestal_correction = (int)cal->pedestal_code - 20;
 
-    for (unsigned current = 0; current < 16u; ++current) {
-        for (unsigned previous = 0; previous < 16u; ++previous) {
-            int delta = adjacent_delta(previous, current);
-            if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
-                delta = -delta;
+    for (unsigned current_q_fine = 0; current_q_fine < 2u;
+         ++current_q_fine) {
+        for (unsigned current = 0; current < 32u; ++current) {
+            for (unsigned previous = 0; previous < 32u; ++previous) {
+                int delta = adjacent_delta(previous, current,
+                                           current_q_fine != 0u);
+                if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
+                    delta = -delta;
 
-            /* FM first: every adjacent phase step contributes at full
-             * precision.  A2..A7 divides the sum of four real discriminator
-             * samples by four only when producing the AV-rate sample. */
-            int contribution = delta * (int)cal->discriminator_gain;
-            contribution += pedestal_correction;
-            /* Counter A starts at 4*20.  Keep every term inside the legal
-             * six-bit DAC excursion so the unsigned accumulator cannot wrap
-             * before the final divide-by-four. */
-            if (contribution < -20) contribution = -20;
-            if (contribution > 43) contribution = 43;
+                /* FM first: every adjacent phase step contributes before the
+                 * real four-sample boxcar/decimator. */
+                int contribution = delta * (int)cal->discriminator_gain;
+                contribution += pedestal_correction;
+                /* Counter A starts at 4*20. Keep the four-term accumulator
+                 * within the legal unsigned six-bit output excursion. */
+                if (contribution < -20) contribution = -20;
+                if (contribution > 43) contribution = 43;
 
-            for (unsigned ignored = 0; ignored < 8u; ++ignored) {
                 const unsigned index =
-                    (current << 7u) | (previous << 3u) | ignored;
+                    (current_q_fine << 10u) | (previous << 5u) | current;
                 lut[index] = (uint8_t)(int8_t)contribution;
             }
         }
     }
 }
 
-esp_err_t c5vrx2_wbfm_direct_create(bitscrambler_handle_t *out)
+esp_err_t c5vrx2_wbfm_direct_configure(bitscrambler_handle_t handle)
 {
-    if (!out) return ESP_ERR_INVALID_ARG;
-    *out = NULL;
+    if (!handle) return ESP_ERR_INVALID_ARG;
 
     uint8_t *lut = heap_caps_malloc(LUT_BYTES, MALLOC_CAP_INTERNAL);
     if (!lut) return ESP_ERR_NO_MEM;
     build_adjacent_lut(lut);
 
-    const bitscrambler_config_t cfg = {
-        .dir = BITSCRAMBLER_DIR_TX,
-        .attach_to = SOC_BITSCRAMBLER_ATTACH_PARL_IO,
-    };
-    bitscrambler_handle_t bs = NULL;
-    esp_err_t err = bitscrambler_new(&cfg, &bs);
-    if (err == ESP_OK) err = bitscrambler_enable(bs);
-    if (err == ESP_OK)
-        err = bitscrambler_load_program(bs,
-                                        c5vrx2_wbfm_direct6_4to1_program);
-    if (err == ESP_OK) err = bitscrambler_load_lut(bs, lut, LUT_BYTES);
-    if (err == ESP_OK) err = bitscrambler_reset(bs);
-    if (err == ESP_OK) err = bitscrambler_start(bs);
+    /* Loading the program here establishes its 8-bit LUT width. PARLIO's
+     * official decoration loads the same program again immediately before
+     * starting GDMA; because the program has no embedded LUT entries, that
+     * does not overwrite these runtime-calibrated 2048 bytes. */
+    esp_err_t err = bitscrambler_load_program(
+        handle, c5vrx2_wbfm_direct6_4to1_program);
+    if (err == ESP_OK) err = bitscrambler_load_lut(handle, lut, LUT_BYTES);
     free(lut);
-
-    if (err != ESP_OK) {
-        if (bs) {
-            (void)bitscrambler_disable(bs);
-            bitscrambler_free(bs);
-        }
-        return err;
-    }
-    *out = bs;
-    return ESP_OK;
+    return err;
 }
 
-void c5vrx2_wbfm_direct_destroy(bitscrambler_handle_t handle)
+const void *c5vrx2_wbfm_direct_program(void)
 {
-    if (!handle) return;
-    (void)bitscrambler_disable(handle);
-    bitscrambler_free(handle);
+    return c5vrx2_wbfm_direct6_4to1_program;
 }

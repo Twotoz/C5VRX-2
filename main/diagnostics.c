@@ -22,6 +22,9 @@
 #define DUMP_PTR_MODE 0x600a9008u
 #define PTR_MASK      0x00003fffu
 
+#define RF_WRAP_SOAK_TARGET 10000u
+#define RF_PHASE_WINDOWS      256u
+
 #define PAL_RATE_HZ          20000000u
 #define PAL_HALF_SAMPLES     640u
 #define PAL_FRAME_HALVES     1250u
@@ -293,27 +296,34 @@ esp_err_t c5vrx2_rf_wrap_diagnostic_run(void)
     const volatile uint32_t *ring = continuous_iq_ring_base();
     uint32_t previous_pointer = REG32(DUMP_PTR_MODE) & PTR_MASK;
     unsigned wraps = 0u;
+    unsigned phase_windows = 0u;
+    unsigned cpu_visible_words = 0u;
     double boundary_abs = 0.0;
     double neighbor_abs = 0.0;
     float worst_difference = 0.0f;
-    while (wraps < 256u) {
+    while (wraps < RF_WRAP_SOAK_TARGET) {
         const uint32_t pointer = REG32(DUMP_PTR_MODE) & PTR_MASK;
         if (pointer < previous_pointer && pointer >= 16u && pointer < 128u) {
-            uint32_t window[16];
-            for (unsigned i = 0; i < 8u; ++i)
-                window[i] = ring[C5VRX2_RF_WORDS - 8u + i];
-            for (unsigned i = 0; i < 8u; ++i) window[8u + i] = ring[i];
-            const float boundary = phase_step(window[7], window[8]);
-            float neighbors = 0.0f;
-            for (unsigned i = 1u; i < 15u; ++i) {
-                if (i == 8u) continue;
-                neighbors += fabsf(phase_step(window[i - 1u], window[i]));
+            if (phase_windows < RF_PHASE_WINDOWS) {
+                uint32_t window[16];
+                for (unsigned i = 0; i < 8u; ++i)
+                    window[i] = ring[C5VRX2_RF_WORDS - 8u + i];
+                for (unsigned i = 0; i < 8u; ++i) window[8u + i] = ring[i];
+                for (unsigned i = 0; i < 16u; ++i)
+                    cpu_visible_words += window[i] != 0u;
+                const float boundary = phase_step(window[7], window[8]);
+                float neighbors = 0.0f;
+                for (unsigned i = 1u; i < 15u; ++i) {
+                    if (i == 8u) continue;
+                    neighbors += fabsf(phase_step(window[i - 1u], window[i]));
+                }
+                neighbors /= 13.0f;
+                const float difference = fabsf(fabsf(boundary) - neighbors);
+                if (difference > worst_difference) worst_difference = difference;
+                boundary_abs += fabsf(boundary);
+                neighbor_abs += neighbors;
+                phase_windows++;
             }
-            neighbors /= 13.0f;
-            const float difference = fabsf(fabsf(boundary) - neighbors);
-            if (difference > worst_difference) worst_difference = difference;
-            boundary_abs += fabsf(boundary);
-            neighbor_abs += neighbors;
             wraps++;
         }
         previous_pointer = pointer;
@@ -322,12 +332,34 @@ esp_err_t c5vrx2_rf_wrap_diagnostic_run(void)
             break;
         }
     }
-    (void)continuous_iq_stop();
+    continuous_iq_stats_t stats;
+    continuous_iq_get_stats(&stats);
+    const bool writer_healthy =
+        err == ESP_OK && wraps == RF_WRAP_SOAK_TARGET &&
+        stats.producer_start_count == 1u && stats.rearm_count == 0u &&
+        stats.trigger_count == 0u &&
+        (stats.dump_control & 0x80040000u) == 0x80000000u;
+    const esp_err_t stop_err = continuous_iq_stop();
+    /* The guard banks are not reliably HP-readable while MAC_DUMP_ALLOC owns
+     * them. Check their contents only after restoring HP ownership. */
+    const bool guards_after_stop = c5vrx2_rf_dump_guards_valid();
+    const bool healthy = writer_healthy && stop_err == ESP_OK && guards_after_stop;
+    if (!healthy && err == ESP_OK) err = ESP_ERR_INVALID_STATE;
     ESP_LOGW(TAG,
-             "RF WRAP samples=%u boundary_abs=%.6f neighbor_abs=%.6f "
+             "RF WRAP SOAK observed=%u phase_windows=%u hw_wraps=%u "
+             "starts=%u rearms=%u triggers=%u ctrl=0x%08x guards=%u "
+             "cpu_visible_words=%u boundary_abs=%.6f neighbor_abs=%.6f "
              "worst_delta=%.6f verdict=%s",
-             wraps, wraps ? boundary_abs / wraps : 0.0,
-             wraps ? neighbor_abs / wraps : 0.0, worst_difference,
-             err == ESP_OK && wraps == 256u ? "CAPTURED_NOT_YET_PROVEN" : "FAIL");
+             wraps, phase_windows, (unsigned)stats.physical_wraps,
+             (unsigned)stats.producer_start_count, (unsigned)stats.rearm_count,
+             (unsigned)stats.trigger_count, (unsigned)stats.dump_control,
+             guards_after_stop, cpu_visible_words,
+             phase_windows ? boundary_abs / phase_windows : 0.0,
+             phase_windows ? neighbor_abs / phase_windows : 0.0,
+             worst_difference,
+             healthy ? (cpu_visible_words != 0u
+                            ? "RING_SOAK_PASS_PHASE_NOT_PROVEN"
+                            : "RING_SOAK_PASS_CPU_VIEW_BLOCKED")
+                     : "FAIL");
     return err;
 }
