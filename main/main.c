@@ -76,7 +76,7 @@ void app_main(void)
     err = c5vrx2_rf_oracle_diagnostic_start();
 #elif CONFIG_C5VRX2_MODE_RF_WRAP
     err = c5vrx2_rf_wrap_diagnostic_run();
-#elif CONFIG_C5VRX2_MODE_RF_DMA
+#elif CONFIG_C5VRX2_MODE_RF_DMA || CONFIG_C5VRX2_MODE_RF_DMA_CPU_OWNED
     err = c5vrx2_rf_dma_diagnostic_run();
 #else
     err = c5vrx2_realtime_start();

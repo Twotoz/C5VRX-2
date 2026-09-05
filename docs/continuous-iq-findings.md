@@ -96,6 +96,29 @@ live alternate view. Both normal AHB views remain static while MAC ownership
 is active, even though bank A contains the completed IQ ring immediately after
 ownership is restored.
 
+A second build retained documented HP-CPU ownership (`SRAM_USAGE=0`) while
+leaving `MAC_DUMP_ALLOC=1`. The autonomous writer still advanced at about
+79.96 MS/s, but neither CPU nor AHB-GDMA obtained a changing live view. Merely
+leaving the ownership selector at zero is therefore not a shared-access mode.
+
+Finally, the official ESP32-C5 HP_APM M1 exception registers were cleared and
+sampled before and after four completed AHB-GDMA reads from both candidate
+banks. The result was identical at every checkpoint:
+
+```text
+HP_APM_M1_STATUS          = 0x00000000
+HP_APM_M1_EXCEPTION_INFO0 = 0x00000000
+HP_APM_M1_EXCEPTION_INFO1 = 0x00000000
+```
+
+During that same run the RF writer measured 79.9705 MS/s and completed 28
+physical wraps from one start with zero triggers. All DMA copies returned
+success, their live snapshots did not change, and after stopping RF all 16,384
+words of bank A were found overwritten while bank B remained untouched. Thus
+HP_APM permission or bounds checking is not blocking the reads. The active
+MAC dump bank exposes a stale/non-live normal AHB view by hardware design; an
+APM permission change cannot make that view live.
+
 ## Claims deliberately not made yet
 
 - No claim of sample-gapless RF time across `16383 -> 0` is made yet.
@@ -103,7 +126,11 @@ ownership is restored.
   observe the IQ words while the current MAC ownership was active.
 - Live PARLIO output is not proven with the RF writer active.
 
-The next bounded experiment is an SRAM-ownership matrix which separately
-checks writer cadence and HP/GDMA visibility while keeping both banks reserved.
-Only after simultaneous access works should coherent-tone phase continuity and
-the live WBFM-to-CVBS pipeline be tested.
+The next bounded experiment is the C5 modem diagnostic path. Vendor
+`coex_hw_debug_matrix_config()` writes `0x600a9408` and routes modem diagnostic
+signals 106 through 109, while `bt_bb_ble_diag_all()` programs
+`0x600a9404` and related selector fields. A diagnostic must first use only
+vendor-observed selector states and determine whether a continuously changing,
+RF-dependent IQ representation exists before attempting a production consumer.
+Only after simultaneous live IQ access works should coherent-tone phase
+continuity and the live WBFM-to-CVBS pipeline be tested.

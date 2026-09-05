@@ -16,6 +16,9 @@ choice C5VRX2_MODE
     config C5VRX2_MODE_RF_DMA
         bool "RF MAC-owned SRAM GDMA visibility diagnostic"
 
+    config C5VRX2_MODE_RF_DMA_CPU_OWNED
+        bool "RF GDMA visibility while HP CPU retains SRAM ownership"
+
     config C5VRX2_MODE_AV_STATIC
         bool "AV static DAC code"
 

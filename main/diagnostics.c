@@ -13,6 +13,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "soc/hp_apm_reg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -23,6 +24,7 @@
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define DUMP_CTRL     0x600a9004u
 #define DUMP_PTR_MODE 0x600a9008u
+#define HP_SRAM_USAGE 0x60095004u
 #define PTR_MASK      0x00003fffu
 
 #define RF_WRAP_SOAK_TARGET 10000u
@@ -358,6 +360,28 @@ static uint32_t probe_hash(const uint8_t *data)
     return hash;
 }
 
+typedef struct {
+    uint32_t status;
+    uint32_t info0;
+    uint32_t info1;
+} hp_apm_m1_snapshot_t;
+
+static hp_apm_m1_snapshot_t hp_apm_m1_snapshot(void)
+{
+    const hp_apm_m1_snapshot_t snapshot = {
+        .status = REG32(HP_APM_M1_STATUS_REG),
+        .info0 = REG32(HP_APM_M1_EXCEPTION_INFO0_REG),
+        .info1 = REG32(HP_APM_M1_EXCEPTION_INFO1_REG),
+    };
+    return snapshot;
+}
+
+static void hp_apm_m1_clear(void)
+{
+    REG32(HP_APM_M1_STATUS_CLR_REG) = HP_APM_M1_EXCEPTION_STATUS_CLR;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+}
+
 esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
 {
     for (unsigned second = 10u; second != 0u; --second) {
@@ -401,12 +425,22 @@ esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
         (RF_BANK_B + source_word * sizeof(uint32_t));
 
     uint32_t a0_us = 0u, a1_us = 0u, b0_us = 0u, b1_us = 0u;
+    hp_apm_m1_clear();
+    const hp_apm_m1_snapshot_t apm_before = hp_apm_m1_snapshot();
+    c5vrx2_trace_stage_detail(181u, ESP_OK, apm_before.status,
+                              apm_before.info0, apm_before.info1);
     const esp_err_t a0_err =
         rf_dma_copy_wait(dma, s_rf_dma_a0, source_a, &s_rf_dma_done_a0,
                          &a0_us);
+    const hp_apm_m1_snapshot_t apm_after_a0 = hp_apm_m1_snapshot();
+    c5vrx2_trace_stage_detail(182u, a0_err, apm_after_a0.status,
+                              apm_after_a0.info0, apm_after_a0.info1);
     const esp_err_t b0_err =
         rf_dma_copy_wait(dma, s_rf_dma_b0, source_b, &s_rf_dma_done_b0,
                          &b0_us);
+    const hp_apm_m1_snapshot_t apm_after_b0 = hp_apm_m1_snapshot();
+    c5vrx2_trace_stage_detail(183u, b0_err, apm_after_b0.status,
+                              apm_after_b0.info0, apm_after_b0.info1);
     /* At ~80 MS/s this exceeds one 16K traversal, so the same physical
      * address should contain a later RF generation. */
     const int64_t wait_begin = esp_timer_get_time();
@@ -417,14 +451,22 @@ esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
         ? rf_dma_copy_wait(dma, s_rf_dma_a1, source_a, &s_rf_dma_done_a1,
                            &a1_us)
         : ESP_ERR_INVALID_STATE;
+    const hp_apm_m1_snapshot_t apm_after_a1 = hp_apm_m1_snapshot();
+    c5vrx2_trace_stage_detail(184u, a1_err, apm_after_a1.status,
+                              apm_after_a1.info0, apm_after_a1.info1);
     const esp_err_t b1_err = b0_err == ESP_OK
         ? rf_dma_copy_wait(dma, s_rf_dma_b1, source_b, &s_rf_dma_done_b1,
                            &b1_us)
         : ESP_ERR_INVALID_STATE;
+    const hp_apm_m1_snapshot_t apm_after_b1 = hp_apm_m1_snapshot();
+    c5vrx2_trace_stage_detail(185u, b1_err, apm_after_b1.status,
+                              apm_after_b1.info0, apm_after_b1.info1);
 
     continuous_iq_stats_t stats;
     continuous_iq_get_stats(&stats);
+    const uint32_t ownership_active = REG32(HP_SRAM_USAGE);
     const esp_err_t stop_err = continuous_iq_stop();
+    const uint32_t ownership_restored = REG32(HP_SRAM_USAGE);
 
     unsigned overwritten_a = 0u;
     unsigned overwritten_b = 0u;
@@ -453,12 +495,25 @@ esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
                               probe_hash(s_rf_dma_b1));
     c5vrx2_trace_stage_detail(207u, stop_err, overwritten_a, overwritten_b,
                               guards_after_stop);
+    c5vrx2_trace_stage_detail(208u, ESP_OK, ownership_active,
+                              ownership_restored, 0u);
+    c5vrx2_trace_stage_detail(209u, ESP_OK, apm_before.status,
+                              apm_before.info0, apm_before.info1);
+    c5vrx2_trace_stage_detail(210u, ESP_OK, apm_after_a0.status,
+                              apm_after_a0.info0, apm_after_a0.info1);
+    c5vrx2_trace_stage_detail(211u, ESP_OK, apm_after_b0.status,
+                              apm_after_b0.info0, apm_after_b0.info1);
+    c5vrx2_trace_stage_detail(212u, ESP_OK, apm_after_a1.status,
+                              apm_after_a1.info0, apm_after_a1.info1);
+    c5vrx2_trace_stage_detail(213u, ESP_OK, apm_after_b1.status,
+                              apm_after_b1.info0, apm_after_b1.info1);
     for (unsigned report = 1u; report <= 30u; ++report) {
         ESP_LOGW(TAG,
                  "RF BANK VISIBILITY report=%u/30 src_word=%u "
                  "A=%s/%uus,%s/%uus live=%u overwritten=%u "
                  "B=%s/%uus,%s/%uus live=%u overwritten=%u "
                  "ptr=%u ctrl=0x%08x starts=%u rearms=%u triggers=%u "
+                 "owner=0x%08x->0x%08x apm=%x/%08x/%08x "
                  "stop=%s guards=%u verdict=%s",
                  report, (unsigned)source_word,
                  esp_err_to_name(a0_err), (unsigned)a0_us,
@@ -470,6 +525,10 @@ esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
                  (unsigned)stats.writer_pointer, (unsigned)stats.dump_control,
                  (unsigned)stats.producer_start_count,
                  (unsigned)stats.rearm_count, (unsigned)stats.trigger_count,
+                 (unsigned)ownership_active, (unsigned)ownership_restored,
+                 (unsigned)apm_after_b1.status,
+                 (unsigned)apm_after_b1.info0,
+                 (unsigned)apm_after_b1.info1,
                  esp_err_to_name(stop_err), guards_after_stop,
                  visible_a ? "BANK_A_LIVE" :
                  visible_b ? "BANK_B_LIVE" : "BOTH_LIVE_VIEWS_BLOCKED");

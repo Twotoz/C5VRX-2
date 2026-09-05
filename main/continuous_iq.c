@@ -175,8 +175,16 @@ esp_err_t continuous_iq_start(void)
     /* Reproduce the vendor wrapper's SRAM grant once.  The linker/heap
      * reservation keeps all HP stacks and objects outside this 64 KiB bank. */
     s_iq.saved_sram_usage = REG32(HP_SRAM_USAGE);
+#if CONFIG_C5VRX2_MODE_RF_DMA_CPU_OWNED
+    /* Bounded shared-access experiment: preserve the documented 64-KiB dump
+     * offset but leave SRAM_USAGE at zero (HP CPU ownership). The physical
+     * dump windows remain excluded from the heap in either case. */
+    REG32(HP_SRAM_USAGE) =
+        (s_iq.saved_sram_usage & 0xfffef0ffu) | 0x00010000u;
+#else
     REG32(HP_SRAM_USAGE) =
         (s_iq.saved_sram_usage & 0xfffef0ffu) | 0x00010200u;
+#endif
     fence_io();
     c5vrx2_trace_stage(105u, ESP_OK);
 
