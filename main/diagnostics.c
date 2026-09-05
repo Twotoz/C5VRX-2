@@ -12,7 +12,10 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_rom_gpio.h"
 #include "esp_timer.h"
+#include "soc/gpio_reg.h"
+#include "soc/gpio_sig_map.h"
 #include "soc/hp_apm_reg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,6 +39,12 @@
 #define RF_BANK_WORDS       16384u
 #define RF_BANK_A_SEED 0xa53c0000u
 #define RF_BANK_B_SEED 0x5ac30000u
+
+#define MODEM_WIDGET_DIAG_FIX      0x600a9404u
+#define MODEM_WIDGET_DIAG_EXCHANGE 0x600a9408u
+#define MODEM_DIAG_SAMPLES          131072u
+#define MODEM_DIAG_LANES                 6u
+#define MODEM_DIAG_CONFIGS               3u
 
 #define PAL_RATE_HZ          20000000u
 #define PAL_HALF_SAMPLES     640u
@@ -66,6 +75,11 @@ static TaskHandle_t s_pal_task;
 static uint16_t s_pal_next_half;
 static bool s_pal_colour;
 static int8_t s_sine[256];
+
+static const gpio_num_t s_modem_diag_pins[MODEM_DIAG_LANES] = {
+    GPIO_NUM_23, GPIO_NUM_24, GPIO_NUM_11,
+    GPIO_NUM_12, GPIO_NUM_8, GPIO_NUM_9,
+};
 
 static esp_err_t configure_dac_tx(uint32_t rate, size_t max_transfer,
                                   unsigned queue_depth)
@@ -539,6 +553,164 @@ esp_err_t c5vrx2_rf_dma_diagnostic_run(void)
     if (!visible_a && !visible_b) return ESP_ERR_NOT_SUPPORTED;
     if (stop_err != ESP_OK) return stop_err;
     return uninstall_err;
+}
+
+typedef struct {
+    uint32_t transitions[MODEM_DIAG_LANES];
+    uint32_t ever_high;
+    uint32_t ever_low;
+    uint32_t elapsed_us;
+} modem_diag_result_t;
+
+static uint32_t modem_diag_read_lanes(void)
+{
+    const uint32_t gpio = REG32(GPIO_IN_REG);
+    uint32_t lanes = 0u;
+    for (unsigned lane = 0u; lane < MODEM_DIAG_LANES; ++lane) {
+        lanes |= ((gpio >> s_modem_diag_pins[lane]) & 1u) << lane;
+    }
+    return lanes;
+}
+
+static void modem_diag_route_batch(unsigned first_signal)
+{
+    for (unsigned lane = 0u; lane < MODEM_DIAG_LANES; ++lane) {
+        const unsigned signal = first_signal + lane;
+        if (signal < 32u) {
+            esp_rom_gpio_connect_out_signal(s_modem_diag_pins[lane],
+                                             MODEM_DIAG0_IDX + signal,
+                                             false, false);
+        } else {
+            esp_rom_gpio_connect_out_signal(s_modem_diag_pins[lane],
+                                             SIG_GPIO_OUT_IDX,
+                                             false, false);
+            (void)gpio_set_level(s_modem_diag_pins[lane], 0);
+        }
+    }
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+}
+
+static modem_diag_result_t modem_diag_sample(void)
+{
+    modem_diag_result_t result = {0};
+    uint32_t previous = modem_diag_read_lanes();
+    result.ever_high = previous;
+    result.ever_low = (~previous) & ((1u << MODEM_DIAG_LANES) - 1u);
+    const int64_t begin = esp_timer_get_time();
+    for (unsigned sample = 0u; sample < MODEM_DIAG_SAMPLES; ++sample) {
+        const uint32_t current = modem_diag_read_lanes();
+        const uint32_t changed = current ^ previous;
+        result.ever_high |= current;
+        result.ever_low |= ~current;
+        for (unsigned lane = 0u; lane < MODEM_DIAG_LANES; ++lane) {
+            result.transitions[lane] += (changed >> lane) & 1u;
+        }
+        previous = current;
+    }
+    result.ever_low &= (1u << MODEM_DIAG_LANES) - 1u;
+    result.elapsed_us = (uint32_t)(esp_timer_get_time() - begin);
+    return result;
+}
+
+esp_err_t c5vrx2_modem_diag_diagnostic_run(void)
+{
+    const uint64_t pin_mask =
+        (1ULL << GPIO_NUM_23) | (1ULL << GPIO_NUM_24) |
+        (1ULL << GPIO_NUM_11) | (1ULL << GPIO_NUM_12) |
+        (1ULL << GPIO_NUM_8) | (1ULL << GPIO_NUM_9);
+    const gpio_config_t gpio_cfg = {
+        .pin_bit_mask = pin_mask,
+        .mode = GPIO_MODE_INPUT_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&gpio_cfg);
+    if (err != ESP_OK) return err;
+
+    /* Leave time for a monitor to display startup before MAC SRAM ownership
+     * makes USB/JTAG observability unreliable on the current C5 setup. */
+    vTaskDelay(pdMS_TO_TICKS(3000u));
+
+    const uint32_t saved_fix = REG32(MODEM_WIDGET_DIAG_FIX);
+    const uint32_t saved_exchange = REG32(MODEM_WIDGET_DIAG_EXCHANGE);
+    modem_diag_result_t results[MODEM_DIAG_CONFIGS][6] = {0};
+
+    err = continuous_iq_start();
+    if (err != ESP_OK) return err;
+
+    for (unsigned config = 0u; config < MODEM_DIAG_CONFIGS; ++config) {
+        uint32_t fix = saved_fix;
+        uint32_t exchange = saved_exchange;
+        if (config >= 1u) exchange = 2u; /* coex vendor state */
+        if (config >= 2u) {
+            /* Final low ten bits produced by C5 bt_bb_ble_diag_all(). */
+            fix = (saved_fix & ~0x3ffu) | 0x14eu;
+        }
+        REG32(MODEM_WIDGET_DIAG_FIX) = fix;
+        REG32(MODEM_WIDGET_DIAG_EXCHANGE) = exchange;
+        __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+        c5vrx2_trace_stage_detail(290u + config, ESP_OK, fix, exchange,
+                                  MODEM_DIAG_SAMPLES);
+
+        for (unsigned batch = 0u; batch < 6u; ++batch) {
+            const unsigned first = batch * MODEM_DIAG_LANES;
+            modem_diag_route_batch(first);
+            results[config][batch] = modem_diag_sample();
+            const modem_diag_result_t *r = &results[config][batch];
+            const uint32_t activity =
+                (r->ever_high & 0x3fu) |
+                ((r->ever_low & 0x3fu) << 8) |
+                (((r->ever_high & r->ever_low) & 0x3fu) << 16);
+            const uint32_t stage = 300u + config * 20u + batch * 2u;
+            c5vrx2_trace_stage_detail(stage, (esp_err_t)activity,
+                                      r->transitions[0], r->transitions[1],
+                                      r->transitions[2]);
+            c5vrx2_trace_stage_detail(stage + 1u, (esp_err_t)activity,
+                                      r->transitions[3], r->transitions[4],
+                                      r->transitions[5]);
+        }
+    }
+
+    REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
+    REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    continuous_iq_stats_t stats;
+    continuous_iq_get_stats(&stats);
+    const esp_err_t stop_err = continuous_iq_stop();
+    c5vrx2_trace_stage_detail(390u, stop_err, saved_fix, saved_exchange,
+                              stats.physical_wraps);
+
+    for (unsigned lane = 0u; lane < MODEM_DIAG_LANES; ++lane) {
+        (void)gpio_reset_pin(s_modem_diag_pins[lane]);
+    }
+    for (unsigned config = 0u; config < MODEM_DIAG_CONFIGS; ++config) {
+        for (unsigned batch = 0u; batch < 6u; ++batch) {
+            const modem_diag_result_t *r = &results[config][batch];
+            ESP_LOGW(TAG,
+                     "MODEM DIAG config=%u signals=%u..%u us=%u "
+                     "high=0x%02x low=0x%02x transitions="
+                     "%u,%u,%u,%u,%u,%u",
+                     config, batch * MODEM_DIAG_LANES,
+                     batch * MODEM_DIAG_LANES + MODEM_DIAG_LANES - 1u,
+                     (unsigned)r->elapsed_us, (unsigned)r->ever_high,
+                     (unsigned)r->ever_low,
+                     (unsigned)r->transitions[0],
+                     (unsigned)r->transitions[1],
+                     (unsigned)r->transitions[2],
+                     (unsigned)r->transitions[3],
+                     (unsigned)r->transitions[4],
+                     (unsigned)r->transitions[5]);
+        }
+    }
+    ESP_LOGW(TAG,
+             "MODEM DIAG STOP rate=%u starts=%u rearms=%u wraps=%u "
+             "triggers=%u result=%s",
+             (unsigned)stats.rf_sample_rate_hz,
+             (unsigned)stats.producer_start_count,
+             (unsigned)stats.rearm_count, (unsigned)stats.physical_wraps,
+             (unsigned)stats.trigger_count, esp_err_to_name(stop_err));
+    return stop_err;
 }
 
 esp_err_t c5vrx2_rf_wrap_diagnostic_run(void)

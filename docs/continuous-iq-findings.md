@@ -134,3 +134,21 @@ vendor-observed selector states and determine whether a continuously changing,
 RF-dependent IQ representation exists before attempting a production consumer.
 Only after simultaneous live IQ access works should coherent-tone phase
 continuity and the live WBFM-to-CVBS pipeline be tested.
+
+The first GPIO-matrix loopback probe sampled all 32 `MODEM_DIAG` outputs in
+six-line batches under three bounded states: reset/default widgets,
+`DIAG_EXCHANGE=2` as written by C5 coexist code, and the final low-ten-bit
+`0x14e` pattern produced by C5 `bt_bb_ble_diag_all()`. With the VTX off,
+signals 0 through 19 toggled continuously while signals 20 through 31 were
+static. With the VTX on, all 32 signals toggled. The strongest VTX-dependent
+transition-count changes occurred on signals 6 through 9 and 16 through 19;
+several increased by hundreds of percent. Both runs retained the autonomous
+79.97-MS/s producer with one start and zero triggers/rearms.
+
+This proves that the GPIO-exposed modem diagnostic bus is a simultaneous live,
+RF-dependent observation path that does not depend on the inaccessible SRAM
+read view. The exact I/Q mapping is not proven: activity in the upper twelve
+signals with a VTX present means they may carry status/metadata or the selected
+bus may be wider than the dump word. The next diagnostic must capture signals
+0 through 19 simultaneously as words and compare their signed/statistical
+structure against the post-stop Q10/I10 SRAM dump.
