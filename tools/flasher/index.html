@@ -36,7 +36,7 @@
       font-size: 14px;
     }
 
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
 
     .topbar {
       height: 64px;
@@ -180,6 +180,73 @@
     }
 
     #firmware { position: absolute; opacity: 0; pointer-events: none; }
+
+    .calibration {
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .calibration-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .calibration-note { color: var(--muted); font-size: 11px; }
+
+    .calibration-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px 20px;
+    }
+
+    .calibration-control {
+      min-width: 0;
+      padding: 11px;
+      background: #1a1d20;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .calibration-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 9px;
+      color: #c4c9ce;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .calibration-value {
+      color: var(--accent);
+      font-variant-numeric: tabular-nums;
+    }
+
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+    select {
+      width: 100%;
+      height: 34px;
+      padding: 0 8px;
+      color: var(--text);
+      background: #171a1d;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+    }
+
+    .preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 12px;
+    }
+
+    .preset-row button { min-height: 30px; padding: 0 10px; font-size: 11px; }
 
     .button-row {
       display: flex;
@@ -343,6 +410,8 @@
       .page-title { align-items: flex-start; flex-direction: column; gap: 5px; }
       .file-row { grid-template-columns: 1fr; }
       .file-button { width: 100%; }
+      .calibration-grid { grid-template-columns: 1fr; }
+      .calibration-head { align-items: flex-start; flex-direction: column; }
       .button-row > button { flex: 1 1 180px; }
       .footer { flex-direction: column; align-items: flex-start; }
     }
@@ -374,8 +443,45 @@
         <label class="field-label" for="firmware">Firmware file</label>
         <div class="file-row">
           <div id="fileDisplay" class="file-display">No firmware selected</div>
+          <button id="latestFirmware" type="button">Use continuous-IQ build</button>
           <label class="file-button" for="firmware">Browse…</label>
           <input id="firmware" type="file" accept=".bin,application/octet-stream">
+        </div>
+
+        <div class="calibration">
+          <div class="calibration-head">
+            <span class="field-label" style="margin:0">Pre-flash IQ / CVBS calibration</span>
+            <span class="calibration-note">Live AV rate is measured RF / 4; USB never paces the stream</span>
+          </div>
+          <div class="calibration-grid">
+            <div class="calibration-control">
+              <label class="calibration-label" for="pedestal">
+                <span>Pedestal / zero level</span>
+                <output id="pedestalValue" class="calibration-value">20</output>
+              </label>
+              <input id="pedestal" type="range" min="12" max="28" step="1" value="20">
+            </div>
+            <div class="calibration-control">
+              <label class="calibration-label" for="gain">
+                <span>FM discriminator gain</span>
+                <output id="gainValue" class="calibration-value">2x</output>
+              </label>
+              <input id="gain" type="range" min="1" max="4" step="1" value="2">
+            </div>
+            <div class="calibration-control">
+              <label class="calibration-label" for="polarity"><span>Discriminator polarity</span></label>
+              <select id="polarity">
+                <option value="0" selected>Current - previous (measured)</option>
+                <option value="1">Previous - current (reverse)</option>
+              </select>
+            </div>
+          </div>
+          <div class="preset-row" aria-label="Calibration presets">
+            <button type="button" data-preset="measured">Measured default</button>
+            <button type="button" data-preset="soft">Lower gain</button>
+            <button type="button" data-preset="strong">Higher gain</button>
+            <button type="button" data-preset="reverse">Reverse polarity</button>
+          </div>
         </div>
 
         <div class="button-row">
@@ -430,11 +536,17 @@
   const connectionText = $("connectionText");
   const fileDisplay = $("fileDisplay");
 
+  const CALIBRATION_ADDRESS = 0x00110000;
+  const CALIBRATION_SIZE = 0x1000;
+  const CALIBRATION_MAGIC = 0x41433543;
+  const CALIBRATION_VERSION = 1;
+
   let port = null;
   let transport = null;
   let loader = null;
   let terminalReader = null;
   let terminalRunning = false;
+  let selectedFirmware = null;
 
   function log(text = "") {
     logEl.textContent += String(text);
@@ -464,6 +576,70 @@
     const message = err?.message ?? String(err);
     setStatus("error", "Error", message);
     line("ERROR: " + message);
+  }
+
+  function calibrationValues() {
+    return {
+      pedestal: Number($("pedestal").value),
+      gain: Number($("gain").value),
+      // Kept in the on-flash v1 record for compatibility. Live firmware
+      // derives AV Fs from measured RF Fs and deliberately ignores this field.
+      clockKHz: 20000,
+      polarity: Number($("polarity").value),
+    };
+  }
+
+  function calibrationText(values = calibrationValues()) {
+    const polarity = values.polarity === 0 ? "current-previous" : "previous-current";
+    return `pedestal=${values.pedestal} gain=${values.gain}x polarity=${polarity} AV-rate=measured-RF/4`;
+  }
+
+  function updateCalibrationLabels() {
+    const values = calibrationValues();
+    $("pedestalValue").textContent = String(values.pedestal);
+    $("gainValue").textContent = `${values.gain}x`;
+    try { localStorage.setItem("c5vrx2Calibration", JSON.stringify(values)); } catch (_) {}
+  }
+
+  function crc32(bytes, length) {
+    let crc = 0xffffffff;
+    for (let i = 0; i < length; ++i) {
+      crc ^= bytes[i];
+      for (let bit = 0; bit < 8; ++bit)
+        crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function buildCalibrationImage() {
+    const values = calibrationValues();
+    const image = new Uint8Array(CALIBRATION_SIZE);
+    image.fill(0xff);
+    const view = new DataView(image.buffer);
+    view.setUint32(0, CALIBRATION_MAGIC, true);
+    view.setUint16(4, CALIBRATION_VERSION, true);
+    view.setUint16(6, 20, true);
+    view.setUint8(8, values.pedestal);
+    view.setUint8(9, values.gain);
+    view.setUint8(10, values.polarity);
+    view.setUint8(11, 0);
+    view.setUint32(12, values.clockKHz * 1000, true);
+    view.setUint32(16, crc32(image, 16), true);
+    return image;
+  }
+
+  const presets = {
+    measured: { pedestal: 20, gain: 2, clockKHz: 20000, polarity: 0 },
+    soft: { pedestal: 20, gain: 1, clockKHz: 20000, polarity: 0 },
+    strong: { pedestal: 20, gain: 3, clockKHz: 20000, polarity: 0 },
+    reverse: { pedestal: 20, gain: 2, clockKHz: 20000, polarity: 1 },
+  };
+
+  function applyCalibration(values) {
+    $("pedestal").value = values.pedestal;
+    $("gain").value = values.gain;
+    $("polarity").value = values.polarity;
+    updateCalibrationLabels();
   }
 
   window.addEventListener("error", (event) => error(event.error || event.message));
@@ -503,9 +679,31 @@
 
   $("firmware").addEventListener("change", () => {
     const file = $("firmware").files[0];
+    selectedFirmware = file || null;
     fileDisplay.textContent = file ? file.name : "No firmware selected";
     if (file) setStatus("", "Ready", `${file.name} selected. Connect bootloader to continue.`);
   });
+
+  $("latestFirmware").onclick = async () => {
+    try {
+      setStatus("busy", "Loading", "Loading bundled IDF 6.0.1 / 40 MHz firmware...");
+      const response = await fetch("c5vrx2-iq-fm-idf601-40.bin", {cache: "no-store"});
+      if (!response.ok) throw new Error(`Bundled firmware HTTP ${response.status}`);
+      selectedFirmware = new File([await response.blob()],
+                                  "c5vrx2-iq-fm-idf601-40.bin",
+                                  {type: "application/octet-stream"});
+      fileDisplay.textContent = selectedFirmware.name;
+      setStatus("", "Ready", "Continuous pre-trigger IQ firmware selected. Connect bootloader to continue.");
+      line(`Selected bundled ${selectedFirmware.name} (${selectedFirmware.size} bytes).`);
+    } catch (e) {
+      error(e);
+    }
+  };
+
+  for (const id of ["pedestal", "gain", "polarity"])
+    $(id).addEventListener("input", updateCalibrationLabels);
+  for (const button of document.querySelectorAll("[data-preset]"))
+    button.addEventListener("click", () => applyCalibration(presets[button.dataset.preset]));
 
   $("connect").onclick = async () => {
     try {
@@ -544,24 +742,31 @@
   $("flash").onclick = async () => {
     try {
       if (!loader) throw new Error("Connect bootloader first.");
-      const file = $("firmware").files[0];
-      if (!file) throw new Error("Choose c5vrx2-full.bin first.");
+      const file = selectedFirmware || $("firmware").files[0];
+      if (!file) throw new Error("Choose firmware or click Use IDF 6.0.1 / 40 MHz safe build first.");
       if (!/\.bin$/i.test(file.name)) throw new Error("Firmware must be a .bin file.");
       const data = new Uint8Array(await file.arrayBuffer());
       if (data.length < 4096) throw new Error("File is too small to be a merged firmware image.");
+      const calibration = buildCalibrationImage();
+      const totalBytes = data.length + calibration.length;
 
       setProgress(0);
-      setStatus("busy", "Flashing", `${file.name} → 0x00000000`);
+      setStatus("busy", "Flashing", `${file.name} + IQ/CVBS calibration`);
       line(`Flashing ${file.name} (${data.length} bytes) at 0x00000000...`);
+      line(`Calibration ${calibrationText()} at 0x${CALIBRATION_ADDRESS.toString(16).padStart(8, "0")}...`);
       await loader.writeFlash({
-        fileArray: [{ data, address: 0x0 }],
+        fileArray: [
+          { data, address: 0x0 },
+          { data: calibration, address: CALIBRATION_ADDRESS },
+        ],
         flashMode: "keep",
         flashFreq: "keep",
         flashSize: "keep",
         eraseAll: false,
         compress: true,
-        reportProgress: (_fileIndex, written, total) => {
-          setProgress(total ? written * 100 / total : 0);
+        reportProgress: (fileIndex, written) => {
+          const completed = (fileIndex === 0 ? 0 : data.length) + written;
+          setProgress(completed * 100 / totalBytes);
         },
       });
       setProgress(100);
@@ -624,6 +829,17 @@
   };
 
   $("clear").onclick = () => { logEl.textContent = ""; };
+
+  try {
+    const saved = JSON.parse(localStorage.getItem("c5vrx2Calibration"));
+    if (saved && Number.isFinite(saved.pedestal) && Number.isFinite(saved.gain) &&
+        Number.isFinite(saved.clockKHz) && Number.isFinite(saved.polarity))
+      applyCalibration(saved);
+    else
+      applyCalibration(presets.measured);
+  } catch (_) {
+    applyCalibration(presets.measured);
+  }
 
   setProgress(0);
   if (!("serial" in navigator)) {

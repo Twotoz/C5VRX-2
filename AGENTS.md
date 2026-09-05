@@ -13,18 +13,17 @@ Use the old repository as a hardware/reverse-engineering donor when needed:
 
 Important: proof24 "live" IQ was host-chained finite `CAPTURE 16384` requests. It was not true chip-side continuous acquisition.
 
-Later C5VRX work proved the fast one-shot rearm primitive and REGDMA/LP-core machinery. Reuse those low-level proven primitives, but do **not** blindly port the later receiver state machine, video classifier, `NO_RF` gating, large per-block copies, or USB capture pipeline.
+Later C5VRX work proved the fast one-shot rearm primitive and REGDMA/LP-core machinery. That is now diagnostic history: the current production direction uses the autonomous pre-trigger ring and does not periodically rearm.
 
 The current architecture contract is:
 
 ```text
 A1 / 5865 MHz
 -> mode-0 packed Q10/I10 writer
--> fixed 16K RF SRAM
--> immediate REGDMA rearm at DONE + PTR=16383
--> direct consumer
--> minimal phase/dphi 4:1 transform
--> 20 MS/s PARLIO
+-> fixed 16K-word circular RF SRAM
+-> adjacent-sample WBFM for every IQ sample
+-> real-domain filter/rate conversion
+-> continuous PARLIO loop GDMA
 -> XIAO D4..D9 resistor DAC
 ```
 
@@ -65,8 +64,11 @@ Those are **not** the currently fitted values. Do not silently substitute them f
 
 - Do not gate IQ production on PAL/NTSC, sync, burst, RF power, VTX detection, or USB.
 - Do not repeat the complete vendor `adctrig()` lifecycle per 16K generation.
-- At a one-shot boundary, launch rearm before telemetry, counters, logging, DSP, or consumer bookkeeping.
+- Do not treat the 16K physical wrap as a capture boundary or restart event.
+- Preserve adjacent-FM state across every normal span and SRAM wrap.
+- Never decimate complex IQ before FM; reduce rate only in the real domain.
 - Do not insert a full 64 KiB per-block memcpy in the hot path.
 - Keep USB/terminal out of the realtime datapath.
+- Keep USB scheduled for asynchronous telemetry; do not mask interrupts or park HP.
 - Do not change D4..D9 GPIO mapping or DAC resistor assumptions unless the physical hardware is explicitly changed.
 - Recognizable video is a later acceptance gate. First prove uninterrupted RF-dependent output across VTX OFF -> ON -> OFF.

@@ -8,24 +8,24 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: espressif/idf:v6.0.2
+    container: espressif/idf:v6.0.1
     steps:
       - uses: actions/checkout@v4
       - name: Build ESP32-C5 realtime firmware
         shell: bash
         run: |
           source /opt/esp/idf/export.sh
-          idf.py set-target esp32c5
-          idf.py build
-          idf.py merge-bin -o c5vrx2-full.bin -f raw
+          idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash40.defaults" build
+          idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flash40.defaults" merge-bin -o c5vrx2-full.bin -f raw
       - name: Prepare hardware-test bundle
         shell: bash
         run: |
           mkdir -p build/c5vrx2-hardware-test
           cp build/c5vrx2-full.bin build/c5vrx2-hardware-test/
+          cp build/c5vrx2-full.bin build/c5vrx2-hardware-test/c5vrx2-iq-fm-idf601-40.bin
           cp docs/hardware-test.md build/c5vrx2-hardware-test/TESTING.md
           cp tools/flasher/index.html build/c5vrx2-hardware-test/flasher.html
-          git rev-parse HEAD > build/c5vrx2-hardware-test/FIRMWARE-COMMIT.txt
+          printf '%s\n' "$GITHUB_SHA" > build/c5vrx2-hardware-test/FIRMWARE-COMMIT.txt
           cd build/c5vrx2-hardware-test
           sha256sum c5vrx2-full.bin > c5vrx2-full.bin.sha256
       - name: Upload hardware-test bundle

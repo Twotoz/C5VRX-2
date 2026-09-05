@@ -1,12 +1,20 @@
 # C5VRX-2 minimal flasher
 
-This intentionally does only three things:
+This intentionally keeps the hardware flow small:
 
 1. connect to the ESP32-C5 ROM bootloader;
 2. flash one merged image at `0x0`;
-3. open a raw 115200 serial terminal.
+3. write a CRC-protected IQ/CVBS calibration record at `0x110000`;
+4. open a raw 115200 serial terminal.
+
+The calibration controls set discriminator pedestal, integer phase gain and
+polarity. Live firmware measures the RF producer cadence and requests an AV
+rate of RF/4; USB and the legacy clock field never pace the stream.
 
 ## Firmware
+
+The local page includes `c5vrx2-iq-fm-idf601-40.bin`; click **Use continuous-IQ build**
+instead of browsing for a file.
 
 The `C5VRX-2 realtime build` GitHub Action produces artifact `c5vrx2-full` containing:
 
@@ -18,7 +26,7 @@ TESTING.md
 flasher.html
 ```
 
-The image is generated with ESP-IDF 6.0.2 `idf.py merge-bin`, so the web flasher does not need separate bootloader, partition-table or application offsets.
+The image is generated with ESP-IDF 6.0.1 at 40 MHz DIO using `idf.py merge-bin`, so the web flasher does not need separate bootloader, partition-table or application offsets.
 The checksum and commit file make the physical result traceable to one PR build.
 
 ## Run the flasher
@@ -42,7 +50,7 @@ Use Chrome or Edge.
 ## Test flow
 
 ```text
-select c5vrx2-full.bin
+click Use continuous-IQ build (or select another merged .bin)
 -> Connect bootloader
 -> Flash merged .bin
 -> Open 115200 terminal

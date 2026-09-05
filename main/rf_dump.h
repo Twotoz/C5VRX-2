@@ -7,4 +7,6 @@
 #define C5VRX2_RF_WORDS     16384u
 
 bool c5vrx2_rf_dump_memory_reserved(void);
+void c5vrx2_rf_dump_guards_init(void);
+bool c5vrx2_rf_dump_guards_valid(void);
 esp_err_t c5vrx2_rf_dump_prepare_mode0(void);

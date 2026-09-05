@@ -1,51 +1,43 @@
 # C5VRX-2
 
-Clean ESP32-C5 realtime analog-FPV receiver experiment.
-
-The branch `realtime-iq-parlio` deliberately starts from the C5VRX proof24 RF/IQ facts and strips the receiver back to the shortest hardware datapath:
+ESP32-C5 experiment for receiving 5.8 GHz analog FPV directly as continuous
+complex IQ and forwarding the recovered composite waveform to a six-bit
+resistor DAC.
 
 ```text
-A1 / 5865 MHz
-      ↓
-mode-0 packed Q10/I10 writer
-      ↓
-fixed 16K RF dump SRAM
-      ↓
-DONE + PTR=16383
-      ↓
-PAU / REGDMA immediate rearm
-      ↓
-looping RF-SRAM consumer
-      ↓
-BitScrambler: phase -> dphi, decimate 4:1
-      ↓
-20 MS/s PARLIO
-      ↓
-XIAO D4..D9 six-resistor DAC
+A1 / 5865 MHz RF
+  -> autonomous pre-trigger Q10/I10 SRAM ring
+  -> adjacent-sample WBFM discriminator
+  -> four-tap real boxcar / rate conversion
+  -> continuous PARLIO/GDMA
+  -> D4..D9 resistor DAC
+  -> 75-ohm CVBS input
 ```
 
-## Non-negotiable realtime rules
+The normal live path does not decode or regenerate PAL. Sync, blanking, luma,
+burst and chroma are already present in the VTX's FM modulation and remain one
+real waveform after FM demodulation.
 
-- VTX presence is **never** required to produce IQ.
-- VTX OFF is valid: off-air noise/spurs still flow through the datapath.
-- `NO_RF`, PAL/NTSC detection, sync/burst analysis and USB are not producer gates.
-- The full vendor `adctrig()` lifecycle is not repeated per 16K generation.
-- At the 16K boundary, REGDMA restart is launched before counters, logging, DSP or consumer bookkeeping.
-- No full 64 KiB per-block memcpy exists in the realtime path.
-- RF SRAM feeds the looping BitScrambler/PARLIO transaction directly.
-- HP is parked while MAC owns the fixed dump SRAM. USB is useful before a run or after a fault, never required during RF acquisition.
+## Current implementation
 
-## First hardware gate
+- `continuous_iq_start()` reproduces the C5 vendor-oracle TX_START/dump-first
+  register state, grants the fixed `0x40830000` SRAM bank once and sets ENABLE
+  once. It never generates START, waits for DONE, rearms, times out or tears RF
+  down while running.
+- The reader API exposes contiguous ring spans with absolute logical positions,
+  guard distance, explicit overrun/discontinuity reporting and no allocation.
+- The production BitScrambler keeps previous IQ across every physical wrap,
+  evaluates all four adjacent phase steps, then performs a real four-sample
+  boxcar before emitting one DAC sample.
+- PARLIO requests `measured_rf_rate / 4` and loops one cyclic GDMA descriptor
+  chain over the RF ring. There is no output stop/restart at SRAM wrap.
+- USB Serial/JTAG remains scheduled. It is telemetry only and never controls or
+  paces RF, DSP or PARLIO.
+- Release builds use ESP-IDF 6.0.1 and 40 MHz DIO flash to avoid the observed
+  ESP32-C5 rev1 startup/MSPI lockup with the tested 6.0.2 build.
 
-Flash `realtime-iq-parlio`, connect the existing D4..D9 resistor DAC to AV, and boot with the VTX **off**. The branch starts automatically; there is no capture command.
+The code is ready to test but does **not** claim physically gapless RF or AV
+until the coherent-tone SRAM-wrap and PARLIO-boundary measurements pass.
 
-Expected behavior:
-
-1. VTX OFF: the physical AV output is still active with RF-dependent/off-air waveform.
-2. Turn VTX ON at A1/5865 without resetting anything: output must change immediately.
-3. Turn VTX OFF again: producer must continue instead of entering a `NO_RF` state.
-4. If the LP producer hits a real writer/rearm fault it restores SRAM ownership and the HP core prints the stored counters/fault registers.
-
-Recognizable stable video is **not** the first acceptance criterion. First prove that RF acquisition and PARLIO consumption remain alive continuously across VTX OFF -> ON -> OFF.
-
-See `docs/realtime-iq-plan.md` for the implementation contract and `docs/hardware-test.md` for the hardware gate.
+See [the realtime contract](docs/realtime-iq-plan.md) and
+[hardware tests](docs/hardware-test.md).
