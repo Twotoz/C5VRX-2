@@ -31,19 +31,27 @@ typedef struct {
     uint32_t trigger_count;
 } continuous_iq_stats_t;
 
-/* Start the C5 dump engine in the exact TX_START/dump-first state recovered
- * from the vendor adctrig(16383, 5, 0, 1, 1, ...) implementation.  There is
- * deliberately no software trigger, DONE wait, timeout, or periodic rearm. */
+/* Start the C5 dump engine with the vendor-derived C5 TX_START selector and
+ * the bit-17 dump-first state subsequently proven by a one-start hardware
+ * soak. There is deliberately no software trigger, DONE wait, timeout, or
+ * periodic rearm. */
 esp_err_t continuous_iq_start(void);
 
 /* Single-consumer span interface.  The caller must poll fast enough that the
- * 16K ring cannot wrap ambiguously.  Production PARLIO uses the same ring as
- * a cyclic DMA source; these calls are primarily for bounded diagnostics. */
+ * 16K ring cannot wrap ambiguously. Hardware has since shown that the live
+ * MAC-owned bank is not readable through ordinary CPU/AHB-GDMA; this API is
+ * therefore diagnostic-only until a live-readable mapping is proven. */
 bool continuous_iq_acquire(iq_span_t *span);
 void continuous_iq_release(const iq_span_t *span);
 
 esp_err_t continuous_iq_stop(void);
+bool continuous_iq_is_running(void);
 void continuous_iq_get_stats(continuous_iq_stats_t *stats);
+
+/* RTC-retained bring-up marker. This performs no flash or USB I/O and exists
+ * solely to locate a CPU reset inside the ownership/enable sequence. */
+uint32_t continuous_iq_debug_last_stage(void);
+void continuous_iq_debug_mark(uint32_t stage);
 
 uint32_t continuous_iq_sample_rate_hz(void);
 const void *continuous_iq_ring_base(void);

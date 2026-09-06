@@ -62,7 +62,9 @@ void app_main(void)
     }
 
     c5vrx2_calibration_load();
+#if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE
     c5vrx2_trace_begin();
+#endif
     c5vrx2_trace_stage(2u, ESP_OK);
 
     err = c5vrx2_wifi5_start_a1();
@@ -80,6 +82,8 @@ void app_main(void)
     err = c5vrx2_rf_dma_diagnostic_run();
 #elif CONFIG_C5VRX2_MODE_MODEM_DIAG
     err = c5vrx2_modem_diag_diagnostic_run();
+#elif CONFIG_C5VRX2_MODE_MODEM_CAPTURE
+    err = c5vrx2_modem_capture_diagnostic_run();
 #else
     err = c5vrx2_realtime_start();
 #endif

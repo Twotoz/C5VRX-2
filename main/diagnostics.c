@@ -10,9 +10,12 @@
 #include "driver/parlio_tx.h"
 #include "esp_async_memcpy.h"
 #include "esp_attr.h"
+#include "esp_cpu.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_rom_gpio.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "soc/gpio_reg.h"
 #include "soc/gpio_sig_map.h"
@@ -45,6 +48,10 @@
 #define MODEM_DIAG_SAMPLES          131072u
 #define MODEM_DIAG_LANES                 6u
 #define MODEM_DIAG_CONFIGS               3u
+#define MODEM_CAPTURE_WORDS            4096u
+#define MODEM_CAPTURE_LANES                8u
+#define MODEM_CAPTURE_MAGIC       0x5043444du
+#define MODEM_CAPTURE_SUBTYPE ((esp_partition_subtype_t)0x42)
 
 #define PAL_RATE_HZ          20000000u
 #define PAL_HALF_SAMPLES     640u
@@ -80,6 +87,87 @@ static const gpio_num_t s_modem_diag_pins[MODEM_DIAG_LANES] = {
     GPIO_NUM_23, GPIO_NUM_24, GPIO_NUM_11,
     GPIO_NUM_12, GPIO_NUM_8, GPIO_NUM_9,
 };
+
+/* Candidate Q4/I4 bus on the nine XIAO pads left beside the six DAC pins.
+ * GPIO2 is deliberately kept free for the later source-synchronous clock
+ * probe. No DAC pin, USB pin, flash/PSRAM pin, LED, or battery pin is used. */
+static const gpio_num_t s_modem_capture_pins[MODEM_CAPTURE_LANES] = {
+    GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,
+    GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,
+};
+static const uint8_t s_modem_capture_signals[MODEM_CAPTURE_LANES] = {
+    6u, 7u, 8u, 9u, 16u, 17u, 18u, 19u,
+};
+static DRAM_ATTR uint32_t s_modem_capture[MODEM_CAPTURE_WORDS];
+
+/* Granting the live dump bank to the modem makes flash-backed interrupt
+ * handlers unsafe on this C5 revision. The capture proof keeps that window
+ * below 5 ms and masks interrupts only from just before arm through stop.
+ * This is diagnostic containment, not the eventual realtime architecture. */
+static inline IRAM_ATTR uint32_t modem_capture_irq_save_disable(void)
+{
+    uint32_t previous;
+    const uint32_t machine_interrupt_enable = 0x8u;
+    __asm__ __volatile__("csrrc %0, mstatus, %1"
+                         : "=r"(previous)
+                         : "r"(machine_interrupt_enable)
+                         : "memory");
+    return previous;
+}
+
+static inline IRAM_ATTR void modem_capture_irq_restore(uint32_t previous)
+{
+    if ((previous & 0x8u) != 0u) {
+        const uint32_t machine_interrupt_enable = 0x8u;
+        __asm__ __volatile__("csrs mstatus, %0"
+                             :
+                             : "r"(machine_interrupt_enable)
+                             : "memory");
+    }
+}
+
+#define MODEM_CAPTURE_PIN_MASK \
+    ((1u << 1) | (1u << 0) | (1u << 25) | (1u << 7) | \
+     (1u << 10) | (1u << 5) | (1u << 3) | (1u << 4))
+#define DAC_PIN_MASK \
+    ((1u << 23) | (1u << 24) | (1u << 11) | (1u << 12) | \
+     (1u << 8) | (1u << 9))
+#define USB_PIN_MASK ((1u << 13) | (1u << 14))
+_Static_assert((MODEM_CAPTURE_PIN_MASK & DAC_PIN_MASK) == 0u,
+               "modem capture overlaps six-bit DAC");
+_Static_assert((MODEM_CAPTURE_PIN_MASK & USB_PIN_MASK) == 0u,
+               "modem capture overlaps native USB");
+_Static_assert((MODEM_CAPTURE_PIN_MASK & (1u << 2)) == 0u,
+               "GPIO2 must remain free for the source clock");
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t header_bytes;
+    uint32_t raw_words;
+    uint32_t ring_words;
+    uint32_t diag_fix;
+    uint32_t diag_exchange;
+    uint32_t gpio_mask;
+    uint32_t sample_us;
+    uint32_t rf_rate_hz;
+    uint32_t writer_pointer;
+    uint32_t dump_control;
+    uint32_t dump_ptr_mode;
+    uint32_t producer_starts;
+    uint32_t physical_wraps;
+    uint32_t trigger_count;
+    uint32_t raw_hash;
+    uint32_t ring_hash;
+    uint32_t capture_end_pointer;
+    uint32_t capture_end_ptr_mode;
+    uint32_t stop_us;
+    uint8_t gpio_for_diag[20];
+    uint8_t reserved[24];
+} modem_capture_header_t;
+
+_Static_assert(sizeof(modem_capture_header_t) == 128u,
+               "modem capture header size");
 
 static esp_err_t configure_dac_tx(uint32_t rate, size_t max_transfer,
                                   unsigned queue_depth)
@@ -369,6 +457,17 @@ static uint32_t probe_hash(const uint8_t *data)
     uint32_t hash = 2166136261u;
     for (unsigned i = 0; i < RF_DMA_PROBE_BYTES; ++i) {
         hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static uint32_t fnv1a_hash(const void *data, size_t bytes)
+{
+    const uint8_t *input = data;
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < bytes; ++i) {
+        hash ^= input[i];
         hash *= 16777619u;
     }
     return hash;
@@ -711,6 +810,222 @@ esp_err_t c5vrx2_modem_diag_diagnostic_run(void)
              (unsigned)stats.rearm_count, (unsigned)stats.physical_wraps,
              (unsigned)stats.trigger_count, esp_err_to_name(stop_err));
     return stop_err;
+}
+
+esp_err_t IRAM_ATTR c5vrx2_modem_capture_diagnostic_run(void)
+{
+    uint64_t pin_mask = 0u;
+    uint32_t stored_pin_mask = 0u;
+    for (unsigned signal = 0u; signal < MODEM_CAPTURE_LANES; ++signal) {
+        pin_mask |= 1ULL << s_modem_capture_pins[signal];
+        stored_pin_mask |= 1u << s_modem_capture_pins[signal];
+    }
+    if (stored_pin_mask != MODEM_CAPTURE_PIN_MASK)
+        return ESP_ERR_INVALID_STATE;
+    const gpio_config_t gpio_cfg = {
+        .pin_bit_mask = pin_mask,
+        .mode = GPIO_MODE_INPUT_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&gpio_cfg);
+    if (err != ESP_OK) return err;
+
+    const uint32_t saved_fix = REG32(MODEM_WIDGET_DIAG_FIX);
+    const uint32_t saved_exchange = REG32(MODEM_WIDGET_DIAG_EXCHANGE);
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        esp_rom_gpio_connect_out_signal(s_modem_capture_pins[lane],
+                                         MODEM_DIAG0_IDX +
+                                             s_modem_capture_signals[lane],
+                                         false, false);
+    }
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+
+    /* Persist a pre-arm marker while CPU still owns all HP SRAM. If the dump
+     * start never returns, this distinguishes that from an earlier Wi-Fi or
+     * diagnostic-entry failure without performing flash I/O while armed. */
+    modem_capture_header_t prearm = {
+        .magic = MODEM_CAPTURE_MAGIC,
+        .version = 3u,
+        .header_bytes = sizeof(modem_capture_header_t),
+        .diag_fix = saved_fix,
+        .diag_exchange = saved_exchange,
+        .gpio_mask = stored_pin_mask,
+    };
+    memset(prearm.gpio_for_diag, 0xff, sizeof(prearm.gpio_for_diag));
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        prearm.gpio_for_diag[s_modem_capture_signals[lane]] =
+            (uint8_t)s_modem_capture_pins[lane];
+    }
+    const uint32_t prearm_stage = 395u;
+    memcpy(prearm.reserved, &prearm_stage, sizeof(prearm_stage));
+    const uint32_t previous_stage = continuous_iq_debug_last_stage();
+    const uint32_t reset_reason = (uint32_t)esp_reset_reason();
+    memcpy(prearm.reserved + 4u, &previous_stage, sizeof(previous_stage));
+    memcpy(prearm.reserved + 8u, &reset_reason, sizeof(reset_reason));
+    const esp_partition_t *prearm_partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, MODEM_CAPTURE_SUBTYPE, "diagcap");
+    if (!prearm_partition) {
+        err = ESP_ERR_NOT_FOUND;
+        goto cleanup_pins;
+    }
+    err = esp_partition_erase_range(prearm_partition, 0u,
+                                    prearm_partition->size);
+    if (err == ESP_OK) {
+        err = esp_partition_write(prearm_partition, 0u, &prearm,
+                                  sizeof(prearm));
+    }
+    if (err != ESP_OK) goto cleanup_pins;
+
+    const uint32_t saved_mstatus = modem_capture_irq_save_disable();
+    continuous_iq_debug_mark(429u);
+    err = continuous_iq_start();
+    if (err != ESP_OK) {
+        modem_capture_irq_restore(saved_mstatus);
+        goto cleanup_pins;
+    }
+    continuous_iq_debug_mark(430u);
+
+    /* Preserve simultaneous bus words. Packing GPIO bits in this hot loop
+     * would reduce the capture rate and is intentionally deferred to the
+     * host-side analysis. */
+    const uint32_t sample_begin = esp_cpu_get_cycle_count();
+    for (unsigned i = 0u; i < MODEM_CAPTURE_WORDS; ++i) {
+        s_modem_capture[i] = REG32(GPIO_IN_REG);
+    }
+    const uint32_t sample_cycles = esp_cpu_get_cycle_count() - sample_begin;
+    const uint32_t sample_us =
+        sample_cycles / CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    continuous_iq_debug_mark(431u);
+
+    continuous_iq_stats_t stats;
+    continuous_iq_get_stats(&stats);
+    continuous_iq_debug_mark(432u);
+    const uint32_t capture_end_ptr_mode = REG32(DUMP_PTR_MODE);
+    const uint32_t capture_end_pointer = capture_end_ptr_mode & PTR_MASK;
+    const uint32_t stop_begin = esp_cpu_get_cycle_count();
+    const esp_err_t stop_err = continuous_iq_stop();
+    const uint32_t stop_cycles = esp_cpu_get_cycle_count() - stop_begin;
+    const uint32_t stop_us =
+        stop_cycles / CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+    continuous_iq_debug_mark(433u);
+    modem_capture_irq_restore(saved_mstatus);
+    const uint32_t stop_ptr_mode = REG32(DUMP_PTR_MODE);
+    const uint32_t stop_pointer = stop_ptr_mode & PTR_MASK;
+
+    REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
+    REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        (void)gpio_reset_pin(s_modem_capture_pins[lane]);
+    }
+
+    if (stop_err != ESP_OK) return stop_err;
+
+    const void *ring = continuous_iq_ring_base();
+    modem_capture_header_t header = {
+        .magic = MODEM_CAPTURE_MAGIC,
+        .version = 1u,
+        .header_bytes = sizeof(modem_capture_header_t),
+        .raw_words = MODEM_CAPTURE_WORDS,
+        .ring_words = C5VRX2_RF_WORDS,
+        .diag_fix = saved_fix,
+        .diag_exchange = saved_exchange,
+        .gpio_mask = stored_pin_mask,
+        .sample_us = sample_us,
+        .rf_rate_hz = stats.rf_sample_rate_hz,
+        .writer_pointer = stop_pointer,
+        .dump_control = stats.dump_control,
+        .dump_ptr_mode = stop_ptr_mode,
+        .producer_starts = stats.producer_start_count,
+        .physical_wraps = stats.physical_wraps,
+        .trigger_count = stats.trigger_count,
+        .raw_hash = fnv1a_hash(s_modem_capture, sizeof(s_modem_capture)),
+        .ring_hash = fnv1a_hash(ring, continuous_iq_ring_bytes()),
+        .capture_end_pointer = capture_end_pointer,
+        .capture_end_ptr_mode = capture_end_ptr_mode,
+        .stop_us = stop_us,
+    };
+    memset(header.gpio_for_diag, 0xff, sizeof(header.gpio_for_diag));
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        header.gpio_for_diag[s_modem_capture_signals[lane]] =
+            (uint8_t)s_modem_capture_pins[lane];
+    }
+
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, MODEM_CAPTURE_SUBTYPE, "diagcap");
+    if (!partition) return ESP_ERR_NOT_FOUND;
+    const size_t raw_offset = sizeof(header);
+    const size_t ring_offset = raw_offset + sizeof(s_modem_capture);
+    const size_t required = ring_offset + continuous_iq_ring_bytes();
+    if (required > partition->size) return ESP_ERR_INVALID_SIZE;
+
+    err = esp_partition_erase_range(partition, 0u, partition->size);
+    if (err == ESP_OK) {
+        err = esp_partition_write(partition, raw_offset, s_modem_capture,
+                                  sizeof(s_modem_capture));
+    }
+    if (err == ESP_OK) {
+        err = esp_partition_write(partition, ring_offset, ring,
+                                  continuous_iq_ring_bytes());
+    }
+    /* Write the completion marker last, so a valid magic always denotes a
+     * complete raw-bus plus RF-ring record. */
+    if (err == ESP_OK) {
+        err = esp_partition_write(partition, 0u, &header, sizeof(header));
+    }
+
+    ESP_LOGW(TAG,
+             "MODEM CAPTURE result=%s samples=%u sample_us=%u rf_hz=%u "
+             "capture_ptr=%u stop_ptr=%u stop_us=%u starts=%u wraps=%u "
+             "triggers=%u raw_hash=%08x ring_hash=%08x",
+             esp_err_to_name(err), MODEM_CAPTURE_WORDS, sample_us,
+             (unsigned)stats.rf_sample_rate_hz, capture_end_pointer,
+             stop_pointer, stop_us, (unsigned)stats.producer_start_count,
+             (unsigned)stats.physical_wraps, (unsigned)stats.trigger_count,
+             (unsigned)header.raw_hash, (unsigned)header.ring_hash);
+    return err;
+
+cleanup_pins:
+    REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
+    REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        (void)gpio_reset_pin(s_modem_capture_pins[lane]);
+    }
+    /* A failed continuous start restores CPU ownership before returning.
+     * Persist a compact result as well, otherwise an erased capture is
+     * indistinguishable from firmware which never reached this diagnostic. */
+    modem_capture_header_t failure = {
+        .magic = MODEM_CAPTURE_MAGIC,
+        .version = 2u,
+        .header_bytes = sizeof(modem_capture_header_t),
+        .diag_fix = saved_fix,
+        .diag_exchange = saved_exchange,
+        .dump_control = REG32(DUMP_CTRL),
+        .dump_ptr_mode = REG32(DUMP_PTR_MODE),
+    };
+    memset(failure.gpio_for_diag, 0xff, sizeof(failure.gpio_for_diag));
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        failure.gpio_for_diag[s_modem_capture_signals[lane]] =
+            (uint8_t)s_modem_capture_pins[lane];
+    }
+    memcpy(failure.reserved, &err, sizeof(err));
+    const uint32_t failure_stage = continuous_iq_debug_last_stage();
+    const uint32_t failure_reset_reason = (uint32_t)esp_reset_reason();
+    memcpy(failure.reserved + 4u, &failure_stage, sizeof(failure_stage));
+    memcpy(failure.reserved + 8u, &failure_reset_reason,
+           sizeof(failure_reset_reason));
+    const esp_partition_t *failure_partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, MODEM_CAPTURE_SUBTYPE, "diagcap");
+    if (failure_partition &&
+        esp_partition_erase_range(failure_partition, 0u,
+                                  failure_partition->size) == ESP_OK) {
+        (void)esp_partition_write(failure_partition, 0u, &failure,
+                                  sizeof(failure));
+    }
+    return err;
 }
 
 esp_err_t c5vrx2_rf_wrap_diagnostic_run(void)

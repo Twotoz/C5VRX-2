@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host reference checks for the continuous IQ -> CVBS streaming path."""
+"""Host checks for continuous-RF invariants and the retired DSP reference."""
 
 from __future__ import annotations
 
@@ -113,16 +113,30 @@ def error_metrics(samples: list[complex]) -> tuple[float, float, float, float]:
 def verify_sources() -> None:
     asm = (ROOT / "main/c5vrx2_wbfm_direct6_4to1.bsasm").read_text()
     realtime = (ROOT / "main/realtime.c").read_text()
+    main = (ROOT / "main/main.c").read_text()
     source = (ROOT / "main/continuous_iq.c").read_text()
     parlio = (ROOT / "main/parlio_direct.c").read_text()
+    diagnostics = (ROOT / "main/diagnostics.c").read_text()
     assert asm.count("ADDCTIAL") == 4
     assert "O6..O10" in asm and "set 0..5 A2..A7" in asm
     assert "set 31 L" in asm and "set 31 H" in asm
     assert "adctrig(" not in source
     assert "CTRL_START" in source and "control | CTRL_ENABLE" in source
     assert "CTRL_START;" not in source
+    assert source.index("c5vrx2_wifi5_lock_rx_only()") < source.index(
+        "s_iq.saved_sram_usage")
     assert ".flags.loop_transmission = true" in parlio
-    assert "rf_rate_hz" in realtime and "av_rate_hz" in realtime
+    # The physically disproven live SRAM route must be blocked at both the API
+    # boundary and app policy. It remains compiled only as a DSP reference.
+    assert "ESP_ERR_NOT_SUPPORTED" in realtime
+    assert "continuous_iq_start" not in realtime
+    assert "c5vrx2_realtime_start()" in main
+    assert "c5vrx2_av_pal_diagnostic_start(false)" in main
+    # Candidate capture keeps USB/DAC pins free and persists only after stop.
+    assert "GPIO_NUM_13" not in diagnostics and "GPIO_NUM_14" not in diagnostics
+    capture = diagnostics.index("c5vrx2_modem_capture_diagnostic_run")
+    assert diagnostics.index("continuous_iq_stop()", capture) < diagnostics.index(
+        "esp_partition_write(partition", capture)
     assert "csrrc" not in realtime and "park_hp" not in realtime
 
 

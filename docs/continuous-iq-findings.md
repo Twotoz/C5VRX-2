@@ -1,7 +1,7 @@
 # ESP32-C5 continuous IQ hardware findings
 
 Hardware under test: ESP32-C5 revision v1.0, A1/5865 MHz receive path.
-The observations below were made on 2026-09-05 with ESP-IDF v6.0.1.
+The observations below were made on 2026-09-05/06 with ESP-IDF v6.0.1.
 
 ## Proven autonomous circular writer
 
@@ -147,8 +147,37 @@ several increased by hundreds of percent. Both runs retained the autonomous
 
 This proves that the GPIO-exposed modem diagnostic bus is a simultaneous live,
 RF-dependent observation path that does not depend on the inaccessible SRAM
-read view. The exact I/Q mapping is not proven: activity in the upper twelve
-signals with a VTX present means they may carry status/metadata or the selected
-bus may be wider than the dump word. The next diagnostic must capture signals
-0 through 19 simultaneously as words and compare their signed/statistical
-structure against the post-stop Q10/I10 SRAM dump.
+read view. The XIAO has exactly eight free candidate data pads while keeping
+the six-bit DAC and native USB intact.
+
+## Proven XIAO 4+4-bit live-IQ mapping
+
+The bounded `MODEM_CAPTURE` diagnostic routed the strongest eight signals to
+the remaining XIAO pads, captured raw `GPIO_IN`, explicitly stopped the single
+RF producer, and then persisted both the GPIO trace and completed Q10/I10 ring.
+The active MAC-ownership window had to run from IRAM with interrupts masked;
+otherwise a flash-backed interrupt handler caused `ESP_RST_WDT`. SRAM ownership
+and interrupts are restored before any flash or USB operation.
+
+VTX-OFF and VTX-ON captures independently converged on the same timing and
+mapping:
+
+```text
+DIAG[6:9]   = dump Q[6:9]
+DIAG[16:19] = dump I[6:9]
+RF/GPIO timing ratio = 17.778
+fixed alignment      = 148 RF samples before capture-end pointer
+
+VTX off: RF 79.9935 MS/s, 95.50% bit match, 822/900 exact bytes
+VTX on:  RF 79.9945 MS/s, 94.75% bit match, 718/900 exact bytes
+```
+
+The VTX-ON ring used the full signed range and all 16 values in both captured
+nibbles, so the result proves individual bit order as well as component/sign
+activity. No nibble swap, bit reversal or inversion improved the match. The
+remaining mismatch is consistent with asynchronous 4.50-MS/s CPU GPIO reads
+of an approximately 80-MS/s bus; it is why production must use the modem's
+source-synchronous clock rather than CPU polling.
+
+`tools/analyze_modem_capture.py` reproduces the circular-offset and timing-ratio
+correlation from a saved `diagcap` partition image.

@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
+#include "esp_cpu.h"
 #include "esp_timer.h"
 
 #include "wifi5.h"
@@ -24,6 +26,7 @@
 #define READER_GUARD_WORDS 256u
 #define RATE_MEASURE_US    4000u
 #define OBSERVER_PERIOD_US 50u
+#define CPU_CYCLES_PER_US  CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
 
 typedef struct {
     bool running;
@@ -48,12 +51,36 @@ typedef struct {
 
 static continuous_iq_state_t s_iq;
 
-static inline void fence_io(void)
+#define DEBUG_STAGE_MAGIC 0xc51a6e2du
+typedef struct {
+    uint32_t magic;
+    uint32_t stage;
+    uint32_t inverse_stage;
+} debug_stage_record_t;
+
+static RTC_NOINIT_ATTR volatile debug_stage_record_t s_debug_stage;
+
+void IRAM_ATTR continuous_iq_debug_mark(uint32_t stage)
+{
+    s_debug_stage.stage = stage;
+    s_debug_stage.inverse_stage = ~stage;
+    s_debug_stage.magic = DEBUG_STAGE_MAGIC;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+}
+
+uint32_t continuous_iq_debug_last_stage(void)
+{
+    return s_debug_stage.magic == DEBUG_STAGE_MAGIC &&
+           s_debug_stage.inverse_stage == ~s_debug_stage.stage ?
+               s_debug_stage.stage : 0u;
+}
+
+static inline IRAM_ATTR void fence_io(void)
 {
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
 }
 
-static inline uint32_t writer_pointer(void)
+static inline IRAM_ATTR uint32_t writer_pointer(void)
 {
     return REG32(DUMP_PTR_MODE) & PTR_MASK;
 }
@@ -62,6 +89,13 @@ static void note_discontinuity(void)
 {
     s_iq.discontinuity_epoch++;
     s_iq.next_span_continuous = false;
+}
+
+static IRAM_ATTR void observe_control(uint32_t control)
+{
+    const bool done = (control & CTRL_DONE) != 0u;
+    if (done && !s_iq.done_latched) s_iq.trigger_count++;
+    s_iq.done_latched = done;
 }
 
 /* This tracker is intentionally for a hot polling consumer.  A slow caller
@@ -95,22 +129,25 @@ static bool update_producer(void)
     return true;
 }
 
+#if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE
 static void observe_producer(void *argument)
 {
     (void)argument;
     if (!s_iq.running) return;
     (void)update_producer();
-    const bool done = (REG32(DUMP_CTRL) & CTRL_DONE) != 0u;
-    if (done && !s_iq.done_latched) s_iq.trigger_count++;
-    s_iq.done_latched = done;
+    observe_control(REG32(DUMP_CTRL));
 }
+#endif
 
-static esp_err_t measure_rate(void)
+static IRAM_ATTR esp_err_t measure_rate(void)
 {
-    const int64_t begin = esp_timer_get_time();
-    int64_t now = begin;
+    continuous_iq_debug_mark(420u);
+    const uint32_t begin = esp_cpu_get_cycle_count();
+    continuous_iq_debug_mark(421u);
+    uint32_t now = begin;
     uint32_t last = writer_pointer();
-    uint64_t words = 0u;
+    continuous_iq_debug_mark(422u);
+    uint32_t words = 0u;
     uint32_t wraps = 0u;
 
     do {
@@ -121,17 +158,26 @@ static esp_err_t measure_rate(void)
         last = current;
         if ((REG32(DUMP_CTRL) & CTRL_DONE) != 0u)
             return ESP_ERR_INVALID_STATE;
-        now = esp_timer_get_time();
-    } while ((uint32_t)(now - begin) < RATE_MEASURE_US);
+        now = esp_cpu_get_cycle_count();
+    } while ((uint32_t)(now - begin) <
+             RATE_MEASURE_US * CPU_CYCLES_PER_US);
 
-    const uint32_t elapsed = (uint32_t)(now - begin);
-    if (elapsed == 0u || words < C5VRX2_RF_WORDS)
+    continuous_iq_debug_mark(425u);
+    const uint32_t elapsed_cycles = now - begin;
+    if (elapsed_cycles == 0u || words < C5VRX2_RF_WORDS)
         return ESP_ERR_TIMEOUT;
 
+    const uint32_t elapsed_us = elapsed_cycles / CPU_CYCLES_PER_US;
+    if (elapsed_us == 0u) return ESP_ERR_TIMEOUT;
+    /* Keep this calculation 32-bit: the MAC-owned active window must not
+     * call a flash-resident compiler helper for 64-bit division. */
     s_iq.rf_sample_rate_hz =
-        (uint32_t)(words * 1000000ull / (uint64_t)elapsed);
+        (words / elapsed_us) * 1000000u +
+        ((words % elapsed_us) * 1000000u) / elapsed_us;
     s_iq.last_pointer = last;
-    s_iq.last_poll_us = now;
+    /* No esp_timer call is permitted while the modem owns its dump SRAM.
+     * Normal live consumption of this CPU-invisible ring is disabled. */
+    s_iq.last_poll_us = 0;
     /* Keep the logical low bits aligned with the physical SRAM address.  The
      * measured word count is a cadence observation, not an absolute ring
      * position. */
@@ -141,20 +187,24 @@ static esp_err_t measure_rate(void)
     return ESP_OK;
 }
 
-esp_err_t continuous_iq_start(void)
+esp_err_t IRAM_ATTR continuous_iq_start(void)
 {
+    continuous_iq_debug_mark(401u);
     c5vrx2_trace_stage(101u, ESP_OK);
     if (s_iq.running) return ESP_ERR_INVALID_STATE;
     if (!c5vrx2_rf_dump_memory_reserved()) return ESP_ERR_INVALID_STATE;
+    continuous_iq_debug_mark(402u);
     c5vrx2_trace_stage(102u, ESP_OK);
 
     esp_err_t err = c5vrx2_rf_dump_prepare_mode0();
     if (err != ESP_OK) return err;
+    continuous_iq_debug_mark(403u);
     c5vrx2_trace_stage(103u, ESP_OK);
 
     memset(&s_iq, 0, sizeof(s_iq));
     s_iq.next_span_continuous = false;
     c5vrx2_rf_dump_guards_init();
+    continuous_iq_debug_mark(404u);
     c5vrx2_trace_stage(104u, ESP_OK);
 
     /* C5 trigmode=TX_START (5) selects 0x00060000 in PTR_MODE.  The C5
@@ -171,10 +221,21 @@ esp_err_t continuous_iq_start(void)
     control |= CTRL_DUMP_FIRST;
     control = (control & ~0x0001ffffu) | C5VRX2_RF_WORDS;
     REG32(DUMP_CTRL) = control;
+    continuous_iq_debug_mark(405u);
+
+    /* Quiesce LMAC while CPU still owns all HP SRAM.  lmac_stop_hw_txq() is
+     * private vendor code and may use internal Wi-Fi state in the bank which
+     * is about to be granted to the modem dump engine.  Once this returns no
+     * software path below can enqueue TX: only register writes remain before
+     * dump ENABLE, so TX_START stays an impossible trigger. */
+    err = c5vrx2_wifi5_lock_rx_only();
+    if (err != ESP_OK) return err;
+    continuous_iq_debug_mark(406u);
 
     /* Reproduce the vendor wrapper's SRAM grant once.  The linker/heap
      * reservation keeps all HP stacks and objects outside this 64 KiB bank. */
     s_iq.saved_sram_usage = REG32(HP_SRAM_USAGE);
+    continuous_iq_debug_mark(407u);
 #if CONFIG_C5VRX2_MODE_RF_DMA_CPU_OWNED
     /* Bounded shared-access experiment: preserve the documented 64-KiB dump
      * offset but leave SRAM_USAGE at zero (HP CPU ownership). The physical
@@ -186,17 +247,12 @@ esp_err_t continuous_iq_start(void)
         (s_iq.saved_sram_usage & 0xfffef0ffu) | 0x00010200u;
 #endif
     fence_io();
-    c5vrx2_trace_stage(105u, ESP_OK);
+    continuous_iq_debug_mark(408u);
 
-    /* wifi5_start_a1() keeps PHY/RX and the 5 GHz tune alive. Re-apply its
-     * one-shot LMAC TX gate immediately before arming, so TX_START cannot
-     * occur in the interval between RF setup and dump ENABLE. */
-    err = c5vrx2_wifi5_lock_rx_only();
-    if (err != ESP_OK) {
-        REG32(HP_SRAM_USAGE) = s_iq.saved_sram_usage;
-        return err;
-    }
-    c5vrx2_trace_stage(106u, ESP_OK);
+    /* Do not write startup_trace (and therefore SPI flash) while MAC owns
+     * the RF dump SRAM. On the XIAO C5 that observability path can stall or
+     * fault immediately after HP_SRAM_USAGE changes. Persist diagnostics only
+     * after continuous_iq_stop() has restored CPU ownership. */
 
     /* DUMP FIRST + never-occurring TX_START starts by ENABLE only.  A START
      * pulse here would select the finite software-trigger lifecycle again. */
@@ -205,17 +261,15 @@ esp_err_t continuous_iq_start(void)
     s_iq.running = true;
     s_iq.producer_start_count = 1u;
     s_iq.last_pointer = writer_pointer();
-    s_iq.last_poll_us = esp_timer_get_time();
-    c5vrx2_trace_stage(107u, ESP_OK);
-
-    c5vrx2_trace_stage(108u, ESP_OK);
+    s_iq.last_poll_us = 0;
+    continuous_iq_debug_mark(409u);
     err = measure_rate();
     if (err != ESP_OK) {
-        c5vrx2_trace_stage(108u, err);
         (void)continuous_iq_stop();
         return err;
     }
-    c5vrx2_trace_stage(109u, ESP_OK);
+    continuous_iq_debug_mark(410u);
+#if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE
     const esp_timer_create_args_t observer_args = {
         .callback = observe_producer,
         .name = "iq_ptr",
@@ -228,7 +282,8 @@ esp_err_t continuous_iq_start(void)
         (void)continuous_iq_stop();
         return err;
     }
-    c5vrx2_trace_stage(110u, ESP_OK);
+#endif
+    continuous_iq_debug_mark(411u);
     return ESP_OK;
 }
 
@@ -279,16 +334,19 @@ void continuous_iq_release(const iq_span_t *span)
     s_iq.span_out = false;
 }
 
-esp_err_t continuous_iq_stop(void)
+esp_err_t IRAM_ATTR continuous_iq_stop(void)
 {
     if (!s_iq.running) return ESP_ERR_INVALID_STATE;
+    /* Stop the producer first. This is an explicit diagnostic/retune stop,
+     * never a normal ring wrap. It also freezes the SRAM before ownership is
+     * returned and before any observer teardown can block. */
+    REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
+    fence_io();
     if (s_iq.observer_timer) {
         (void)esp_timer_stop(s_iq.observer_timer);
         (void)esp_timer_delete(s_iq.observer_timer);
         s_iq.observer_timer = NULL;
     }
-    REG32(DUMP_CTRL) &= ~CTRL_ENABLE;
-    fence_io();
     REG32(HP_SRAM_USAGE) = s_iq.saved_sram_usage;
     fence_io();
     s_iq.running = false;
@@ -297,13 +355,23 @@ esp_err_t continuous_iq_stop(void)
     return ESP_OK;
 }
 
-void continuous_iq_get_stats(continuous_iq_stats_t *stats)
+bool continuous_iq_is_running(void)
+{
+    return s_iq.running;
+}
+
+void IRAM_ATTR continuous_iq_get_stats(continuous_iq_stats_t *stats)
 {
     if (!stats) return;
+    /* Capture mode intentionally has no 50-us observer timer. Sample DONE
+     * here as well so a trigger occurring after rate measurement cannot be
+     * reported as a false zero in the persisted diagnostic. */
+    const uint32_t control = REG32(DUMP_CTRL);
+    if (s_iq.running) observe_control(control);
     *stats = (continuous_iq_stats_t) {
         .rf_sample_rate_hz = s_iq.rf_sample_rate_hz,
         .writer_pointer = writer_pointer(),
-        .dump_control = REG32(DUMP_CTRL),
+        .dump_control = control,
         .producer_words = s_iq.producer_words,
         .consumer_words = s_iq.consumer_words,
         .physical_wraps = s_iq.physical_wraps,

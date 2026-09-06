@@ -19,6 +19,7 @@
 extern int lmac_stop_hw_txq(void);
 
 static const char *TAG = "c5vrx2_wifi5";
+static bool s_lmac_tx_stopped;
 
 bool c5vrx2_wifi5_tx_is_quiescent(void)
 {
@@ -32,7 +33,13 @@ bool c5vrx2_wifi5_tx_is_quiescent(void)
 
 esp_err_t c5vrx2_wifi5_lock_rx_only(void)
 {
-    (void)lmac_stop_hw_txq();
+    /* The vendor bookkeeping call is not documented as re-entrant. Run it
+     * once, while Wi-Fi owns its complete normal memory view. Repeated arm
+     * checks only close the hardware gates again and verify their state. */
+    if (!s_lmac_tx_stopped) {
+        (void)lmac_stop_hw_txq();
+        s_lmac_tx_stopped = true;
+    }
     for (unsigned queue = 0; queue < MAC_TXQ_COUNT; ++queue)
         REG32(MAC_TXQ0_CONF - queue * MAC_TXQ_STRIDE) &= ~MAC_TXQ_ENABLE;
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
@@ -59,7 +66,10 @@ esp_err_t c5vrx2_wifi5_start_a1(void)
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 
-    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+    /* The pre-trigger producer requires the RX/PHY clock domain to remain
+     * alive continuously. Treat failure to disable Wi-Fi power saving as a
+     * hard startup error instead of silently accepting a gated frontend. */
+    if ((err = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK) return err;
     wifi_protocols_t protocols = {
         .ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G |
                   WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX,

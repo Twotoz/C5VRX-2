@@ -59,6 +59,10 @@ void c5vrx2_trace_stage_detail(uint32_t stage, esp_err_t error,
                                uint32_t detail0, uint32_t detail1,
                                uint32_t detail2)
 {
+    /* SPI-flash writes are forbidden while the autonomous modem dump owns
+     * the HP SRAM banks. Besides perturbing realtime operation, this was
+     * observed to make native USB/startup fail nondeterministically. */
+    if (continuous_iq_is_running()) return;
     if (!s_partition ||
         (s_sequence + 1u) * sizeof(trace_record_t) > s_partition->size)
         return;
