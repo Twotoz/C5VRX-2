@@ -34,15 +34,15 @@ static int q4_phase8(unsigned packed)
     return phase8;
 }
 
-static int scale_phase(int phase, unsigned calibration_gain)
+static int scale_real_sum(int sum, unsigned calibration_gain)
 {
-    /* At the coherent 40-MS/s input the adjacent phase step is twice the
-     * historical 80-MS/s step. Preserve the half-step represented by an
-     * even calibration setting instead of truncating 3/2 back to 1. */
-    const int numerator = (int)calibration_gain + 1;
-    const int magnitude = abs(phase);
-    const int scaled = (magnitude * numerator + 1) / 2;
-    return phase < 0 ? -scaled : scaled;
+    /* sum is signed (delta1 + delta2). Gain belongs here, after circular
+     * differencing and signed unwrap. Settings 1..4 represent 1.0x, 1.5x,
+     * 2.0x and 2.5x respectively; division by two is the real 40->20 MS/s
+     * boxcar. Round symmetrically before the final DAC clamp. */
+    const int numerator = sum * ((int)calibration_gain + 1);
+    return numerator < 0 ? -((-numerator + 2) / 4) :
+                           (numerator + 2) / 4;
 }
 
 static void build_lut(uint16_t lut[LUT_ITEMS])
@@ -50,8 +50,7 @@ static void build_lut(uint16_t lut[LUT_ITEMS])
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
     for (unsigned index = 0; index < LUT_ITEMS; ++index) {
         if (index < 0x100u) {
-            int phase = scale_phase(q4_phase8(index),
-                                    cal->discriminator_gain);
+            int phase = q4_phase8(index);
             if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
                 phase = -phase;
             const uint8_t phase_mod = (uint8_t)phase;
@@ -61,7 +60,8 @@ static void build_lut(uint16_t lut[LUT_ITEMS])
         } else if (index < 0x200u) {
             int sum = (int)(index & 0xffu);
             if (sum >= 128) sum -= 256;
-            int code = (int)cal->pedestal_code + sum / 2;
+            int code = (int)cal->pedestal_code +
+                       scale_real_sum(sum, cal->discriminator_gain);
             if (code < 0) code = 0;
             if (code > 63) code = 63;
             lut[index] = (uint16_t)(uint8_t)code;

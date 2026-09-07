@@ -3,14 +3,14 @@
 # Each input byte is Q[9:6] in bits 3:0 and I[9:6] in bits 7:4. The 16-bit
 # LUT maps the complete byte to:
 #
-#   L0..L7   = calibrated absolute phase
-#   L8..L15  = -calibrated absolute phase
+#   L0..L7   = unscaled absolute phase
+#   L8..L15  = -unscaled absolute phase
 #
 # Adding the low byte for the current sample and the saved high byte for the
 # previous sample gives phase[n] - phase[n-1], modulo eight bits. Two genuine
 # adjacent discriminator results are accumulated. LUT bank 1 then interprets
-# that modulo sum as signed, averages it, adds the calibrated pedestal, and
-# clamps the result to a legal six-bit DAC code.
+# that modulo sum as signed, applies the calibrated real-domain gain and /2,
+# adds pedestal, and clamps the result to a legal six-bit DAC code.
 #
 # O8..O15 retains pedestal-phase[n-1] across every normal GDMA ring wrap.
 
