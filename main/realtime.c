@@ -1,5 +1,6 @@
 #include "realtime.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -47,6 +48,8 @@ static const uint8_t s_iq_diag[8] = {6u, 7u, 8u, 9u, 16u, 17u, 18u, 19u};
  * reads the same ring at the exact same PLL-derived rate. 8192 bytes provide
  * about 410 us of elastic storage without adding a frame buffer. */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_cvbs_ring[CVBS_RING_BYTES];
+static DRAM_ATTR __attribute__((aligned(16))) uint8_t
+    s_cvbs_snapshot[CVBS_RING_BYTES];
 
 static parlio_rx_unit_handle_t s_rx;
 static parlio_rx_delimiter_handle_t s_rx_delimiter;
@@ -196,6 +199,31 @@ static esp_err_t start_tx_ring(void)
                                    sizeof(s_cvbs_ring) * 8u, &cfg);
 }
 
+static int snapshot_correlation_permille(size_t lag)
+{
+    int64_t sum_a = 0;
+    int64_t sum_b = 0;
+    int64_t sum_aa = 0;
+    int64_t sum_bb = 0;
+    int64_t sum_ab = 0;
+    const int64_t count = (int64_t)(sizeof(s_cvbs_snapshot) - lag);
+    for (size_t i = 0u; i + lag < sizeof(s_cvbs_snapshot); ++i) {
+        const int a = s_cvbs_snapshot[i];
+        const int b = s_cvbs_snapshot[i + lag];
+        sum_a += a;
+        sum_b += b;
+        sum_aa += (int64_t)a * a;
+        sum_bb += (int64_t)b * b;
+        sum_ab += (int64_t)a * b;
+    }
+    const int64_t covariance = count * sum_ab - sum_a * sum_b;
+    const int64_t variance_a = count * sum_aa - sum_a * sum_a;
+    const int64_t variance_b = count * sum_bb - sum_b * sum_b;
+    if (variance_a <= 0 || variance_b <= 0) return 0;
+    return (int)lrint(1000.0 * (double)covariance /
+                      sqrt((double)variance_a * (double)variance_b));
+}
+
 static void telemetry_task(void *argument)
 {
     (void)argument;
@@ -208,17 +236,19 @@ static void telemetry_task(void *argument)
         if (current == previous) stalls++;
         previous = current;
 
-        /* Read-only proof that the RX BitScrambler is continuously replacing
-         * the initial pedestal bytes. Sampling ordinary internal DMA SRAM is
-         * non-intrusive; this does not synchronize, stop or rearm either DMA. */
+        /* Copy in one optimized burst before analysis. A direct multi-pass
+         * scan takes longer than the 410-us ring period and would correlate
+         * samples from different laps. This snapshot does not stop, sync or
+         * rearm either DMA; at most one short writer seam can cross it. */
+        memcpy(s_cvbs_snapshot, s_cvbs_ring, sizeof(s_cvbs_snapshot));
         uint32_t sum = 0u;
         uint32_t transitions = 0u;
         uint32_t non_pedestal = 0u;
         uint8_t minimum = UINT8_MAX;
         uint8_t maximum = 0u;
-        uint8_t last = *(volatile uint8_t *)&s_cvbs_ring[0];
-        for (size_t i = 0u; i < sizeof(s_cvbs_ring); ++i) {
-            const uint8_t sample = *(volatile uint8_t *)&s_cvbs_ring[i];
+        uint8_t last = s_cvbs_snapshot[0];
+        for (size_t i = 0u; i < sizeof(s_cvbs_snapshot); ++i) {
+            const uint8_t sample = s_cvbs_snapshot[i];
             if (sample < minimum) minimum = sample;
             if (sample > maximum) maximum = sample;
             sum += sample;
@@ -229,11 +259,14 @@ static void telemetry_task(void *argument)
         ESP_LOGI(TAG,
                  "LIVE iq_in=40M cvbs_out=20M ptr=%u enable=%u done=%u "
                  "stalls=%u starts=1 rearms=0 cvbs_min=%u cvbs_max=%u "
-                 "cvbs_avg=%u cvbs_nonped=%u cvbs_changes=%u",
+                 "cvbs_avg=%u cvbs_nonped=%u cvbs_changes=%u "
+                 "corr_ntsc=%d corr_pal=%d",
                  (unsigned)current, (control & CTRL_ENABLE) != 0u,
                  (control & CTRL_DONE) != 0u, (unsigned)stalls,
                  minimum, maximum, (unsigned)(sum / sizeof(s_cvbs_ring)),
-                 (unsigned)non_pedestal, (unsigned)transitions);
+                 (unsigned)non_pedestal, (unsigned)transitions,
+                 snapshot_correlation_permille(1271u),
+                 snapshot_correlation_permille(1280u));
     }
 }
 
@@ -262,7 +295,7 @@ esp_err_t c5vrx2_realtime_start(void)
     esp_rom_delay_us((CVBS_RING_BYTES / 2u) * 1000000u / CVBS_RATE_HZ);
     if ((err = start_tx_ring()) != ESP_OK) return err;
 
-    BaseType_t created = xTaskCreate(telemetry_task, "iq_av_stat", 3072,
+    BaseType_t created = xTaskCreate(telemetry_task, "iq_av_stat", 4096,
                                      NULL, 1u, NULL);
     if (created != pdPASS) return ESP_ERR_NO_MEM;
 
