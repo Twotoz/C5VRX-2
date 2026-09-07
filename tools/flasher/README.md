@@ -8,8 +8,9 @@ This intentionally keeps the hardware flow small:
 4. open a raw 115200 serial terminal.
 
 The calibration controls set discriminator pedestal, integer phase gain and
-polarity. Live firmware measures the RF producer cadence and requests an AV
-rate of RF/4; USB and the legacy clock field never pace the stream.
+polarity. Live firmware acquires a coherent 2:1 subset of the approximately
+80-MS/s MODEM bus at 40 MS/s, performs adjacent FM on every acquired sample,
+then real-domain 2:1 filtering to the 20-MS/s AV stream. USB never paces it.
 
 ## Firmware
 

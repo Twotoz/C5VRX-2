@@ -84,6 +84,8 @@ void app_main(void)
     err = c5vrx2_modem_diag_diagnostic_run();
 #elif CONFIG_C5VRX2_MODE_MODEM_CAPTURE
     err = c5vrx2_modem_capture_diagnostic_run();
+#elif CONFIG_C5VRX2_MODE_MODEM_PARLIO
+    err = c5vrx2_modem_parlio_diagnostic_run();
 #else
     err = c5vrx2_realtime_start();
 #endif

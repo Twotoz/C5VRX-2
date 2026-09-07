@@ -181,3 +181,19 @@ source-synchronous clock rather than CPU polling.
 
 `tools/analyze_modem_capture.py` reproduces the circular-offset and timing-ratio
 correlation from a saved `diagcap` partition image.
+
+## Bounded PARLIO capture and first live path
+
+Routing the proven Q4/I4 lanes into PARLIO RX produced a bit-perfect bounded
+capture of every second native MODEM sample. The RF/dump cadence remained about
+79.99 MS/s while PARLIO RX topped out at about 40 MS/s even when F80 or F160
+was requested. The current LIVE path therefore treats 40 MS/s as its acquired
+complex-IQ rate, runs adjacent FM on every acquired sample, and performs the
+next 2:1 reduction only in the real domain.
+
+The receive transaction is genuinely cyclic: ESP-IDF 6.0.1 maps
+`partial_rx_en=true` to an infinite transaction and links the final RX-GDMA
+node back to the head. The output transaction independently uses PARLIO's
+hardware `loop_transmission` mode. A short sequence match does not prove that
+80-to-40 sampling remains phase-locked indefinitely, nor that either DMA ring
+boundary is sample-perfect; those remain explicit hardware tests.

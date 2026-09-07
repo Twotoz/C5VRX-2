@@ -5,7 +5,7 @@ choice C5VRX2_MODE
     default C5VRX2_MODE_LIVE
 
     config C5VRX2_MODE_LIVE
-        bool "Live receiver (guarded until simultaneous IQ is proven)"
+        bool "Live MODEM_DIAG IQ to recovered CVBS"
 
     config C5VRX2_MODE_RF_ORACLE
         bool "RF vendor pre-trigger oracle"
@@ -24,6 +24,9 @@ choice C5VRX2_MODE
 
     config C5VRX2_MODE_MODEM_CAPTURE
         bool "Capture XIAO-native candidate Q4/I4 modem bytes"
+
+    config C5VRX2_MODE_MODEM_PARLIO
+        bool "Capture proven Q4/I4 bus with PARLIO RX"
 
     config C5VRX2_MODE_AV_STATIC
         bool "AV static DAC code"

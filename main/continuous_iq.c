@@ -129,7 +129,8 @@ static bool update_producer(void)
     return true;
 }
 
-#if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE
+#if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE && !CONFIG_C5VRX2_MODE_MODEM_PARLIO && \
+    !CONFIG_C5VRX2_MODE_LIVE
 static void observe_producer(void *argument)
 {
     (void)argument;
@@ -236,10 +237,11 @@ esp_err_t IRAM_ATTR continuous_iq_start(void)
      * reservation keeps all HP stacks and objects outside this 64 KiB bank. */
     s_iq.saved_sram_usage = REG32(HP_SRAM_USAGE);
     continuous_iq_debug_mark(407u);
-#if CONFIG_C5VRX2_MODE_RF_DMA_CPU_OWNED
-    /* Bounded shared-access experiment: preserve the documented 64-KiB dump
-     * offset but leave SRAM_USAGE at zero (HP CPU ownership). The physical
-     * dump windows remain excluded from the heap in either case. */
+#if CONFIG_C5VRX2_MODE_RF_DMA_CPU_OWNED || CONFIG_C5VRX2_MODE_LIVE
+    /* MODEM_DIAG is LIVE's sample transport. Keep HP CPU ownership so USB,
+     * interrupts and normal code remain available; the dump engine is used
+     * only to keep the verified RF/diagnostic source configured and armed.
+     * Both physical windows remain excluded from the heap. */
     REG32(HP_SRAM_USAGE) =
         (s_iq.saved_sram_usage & 0xfffef0ffu) | 0x00010000u;
 #else
@@ -269,7 +271,8 @@ esp_err_t IRAM_ATTR continuous_iq_start(void)
         return err;
     }
     continuous_iq_debug_mark(410u);
-#if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE
+#if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE && !CONFIG_C5VRX2_MODE_MODEM_PARLIO && \
+    !CONFIG_C5VRX2_MODE_LIVE
     const esp_timer_create_args_t observer_args = {
         .callback = observe_producer,
         .name = "iq_ptr",

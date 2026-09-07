@@ -32,9 +32,11 @@ diagnostic abstraction rather than the current production source.
 The simultaneous GPIO/ring diagnostic subsequently proved the replacement
 XIAO source exactly: `MODEM_DIAG[6:9] = Q[6:9]` and
 `MODEM_DIAG[16:19] = I[6:9]`. The VTX-ON capture matched 94.75% of individual
-bits against the Q10/I10 ring under asynchronous CPU polling. Production will
-route those eight signals internally to PARLIO RX; only the matching modem
-sample clock remains to be identified and proven.
+bits against the Q10/I10 ring under asynchronous CPU polling. Production
+routes those eight signals internally to PARLIO RX. Bounded hardware captures
+proved a bit-perfect sequence of every second MODEM sample at the C5 PARLIO
+receive ceiling of about 40 MS/s. Long-duration phase/slip continuity still
+requires a physical test.
 
 ## DSP and output
 
@@ -44,25 +46,24 @@ For every adjacent pair, including across normal DMA/ring boundaries:
 d[n] = arg(x[n] * conj(x[n-1]))
 ```
 
-The retired direct-SRAM experiment contains a compact signed-I/Q BitScrambler
-approximation. It processes all adjacent samples, accumulates four real FM
-results, then emits their boxcar average, but it is not a live source because
-the input SRAM view is stale. The host validator retains the exact
-floating-point conjugate-product reference and reports adjacent, post-filter
-and +/-pi-seam errors for reuse by the MODEM_DIAG implementation.
+The live RX BitScrambler consumes the proven Q4/I4 byte representation. It
+retains previous-IQ state across output samples and the cyclic GDMA boundary,
+applies a calibrated adjacent-phase LUT to every acquired sample, accumulates
+two real discriminator results, and only then emits their two-sample boxcar
+average. The retired direct-SRAM path remains diagnostic-only because its
+input SRAM view is stale.
 
-RF and AV rates remain separate state. The RF dump writer measures about
-79.97 MS/s; the proven synthetic AV transport runs at 20 MHz. The replacement
-live path must measure the MODEM_DIAG/PARLIO-RX cadence and bridge it to the
-actual PARLIO-TX rate only after adjacent FM, using a real-domain filter and
-resampler. It must not infer RF cadence from an old argument name or decimate
-complex IQ before the discriminator.
+RF and AV rates remain separate state. The RF dump/MODEM bus measures about
+79.99 MS/s, PARLIO acquires a coherent 2:1 subset at 40 MS/s, and the DAC runs
+at 20 MS/s. Every acquired complex sample reaches the discriminator before the
+real-domain 2:1 boxcar. The 40/20 PARLIO dividers use the same clock source so
+their ring distance is intended to remain fixed; that boundary still needs a
+scope/soak proof.
 
-PARLIO hardware loop mode itself is available and the synthetic PAL diagnostic
-proves safe loop-buffer switching. Directly mounting the MAC-owned IQ SRAM is
-disabled because its live AHB view is stale. The candidate replacement is the
-RF-dependent MODEM_DIAG bus feeding PARLIO RX, followed by adjacent FM and a
-separate continuous PARLIO TX stream.
+PARLIO RX uses its documented infinite transaction mode, whose final GDMA node
+links back to the head. PARLIO TX uses hardware loop transmission. Directly
+mounting the MAC-owned IQ SRAM remains disabled because its live AHB view is
+stale.
 
 ## Realtime and USB rules
 

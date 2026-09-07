@@ -9,6 +9,7 @@ idf_component_register(
         "wifi5.c"
         "rf_dump.c"
         "wbfm_direct.c"
+        "wbfm_q4.c"
         "parlio_direct.c"
         "realtime.c"
     INCLUDE_DIRS "."
@@ -32,6 +33,7 @@ idf_component_register(
 )
 
 target_bitscrambler_add_src("c5vrx2_wbfm_direct6_4to1.bsasm")
+target_bitscrambler_add_src("c5vrx2_wbfm_q4_2to1.bsasm")
 
 target_link_options(${COMPONENT_LIB} INTERFACE
     "-T${CMAKE_CURRENT_LIST_DIR}/rf_dump_memory.ld")

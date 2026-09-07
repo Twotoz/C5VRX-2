@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/parlio_rx.h"
 #include "driver/parlio_tx.h"
 #include "esp_async_memcpy.h"
 #include "esp_attr.h"
@@ -19,13 +20,18 @@
 #include "esp_timer.h"
 #include "soc/gpio_reg.h"
 #include "soc/gpio_sig_map.h"
+#include "soc/gpio_ext_struct.h"
+#include "soc/clk_tree_defs.h"
 #include "soc/hp_apm_reg.h"
+#include "soc/parl_io_struct.h"
+#include "soc/pcr_struct.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "continuous_iq.h"
 #include "rf_dump.h"
 #include "startup_trace.h"
+#include "wifi5.h"
 
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define DUMP_CTRL     0x600a9004u
@@ -45,11 +51,18 @@
 
 #define MODEM_WIDGET_DIAG_FIX      0x600a9404u
 #define MODEM_WIDGET_DIAG_EXCHANGE 0x600a9408u
-#define MODEM_DIAG_SAMPLES          131072u
+#define MODEM_SYSCON_TEST_CONF      0x600a9c00u
+#define MODEM_FPGA_DEBUG_CLK80      (1u << 4)
+#define MODEM_FPGA_DEBUG_CLKSWITCH  (1u << 3)
+#define MODEM_DIAG_SAMPLES            8192u
 #define MODEM_DIAG_LANES                 6u
-#define MODEM_DIAG_CONFIGS               3u
+#define MODEM_DIAG_CONFIGS               4u
 #define MODEM_CAPTURE_WORDS            4096u
 #define MODEM_CAPTURE_LANES                8u
+#define MODEM_PARLIO_BYTES             2048u
+#define MODEM_PARLIO_SAMPLE_RATE_HZ   80000000u
+#define MODEM_PARLIO_CAPTURE_US           35u
+#define MODEM_PARLIO_CLOCK_GPIO       GPIO_NUM_2
 #define MODEM_CAPTURE_MAGIC       0x5043444du
 #define MODEM_CAPTURE_SUBTYPE ((esp_partition_subtype_t)0x42)
 
@@ -99,6 +112,8 @@ static const uint8_t s_modem_capture_signals[MODEM_CAPTURE_LANES] = {
     6u, 7u, 8u, 9u, 16u, 17u, 18u, 19u,
 };
 static DRAM_ATTR uint32_t s_modem_capture[MODEM_CAPTURE_WORDS];
+static DRAM_ATTR uint8_t s_modem_parlio_capture[MODEM_PARLIO_BYTES]
+    __attribute__((aligned(64)));
 
 /* Granting the live dump bank to the modem makes flash-backed interrupt
  * handlers unsafe on this C5 revision. The capture proof keeps that window
@@ -661,7 +676,7 @@ typedef struct {
     uint32_t elapsed_us;
 } modem_diag_result_t;
 
-static uint32_t modem_diag_read_lanes(void)
+static uint32_t IRAM_ATTR modem_diag_read_lanes(void)
 {
     const uint32_t gpio = REG32(GPIO_IN_REG);
     uint32_t lanes = 0u;
@@ -671,7 +686,7 @@ static uint32_t modem_diag_read_lanes(void)
     return lanes;
 }
 
-static void modem_diag_route_batch(unsigned first_signal)
+static void IRAM_ATTR modem_diag_route_batch(unsigned first_signal)
 {
     for (unsigned lane = 0u; lane < MODEM_DIAG_LANES; ++lane) {
         const unsigned signal = first_signal + lane;
@@ -689,7 +704,7 @@ static void modem_diag_route_batch(unsigned first_signal)
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
 }
 
-static modem_diag_result_t modem_diag_sample(void)
+static modem_diag_result_t IRAM_ATTR modem_diag_sample(void)
 {
     modem_diag_result_t result = {0};
     uint32_t previous = modem_diag_read_lanes();
@@ -733,35 +748,70 @@ esp_err_t c5vrx2_modem_diag_diagnostic_run(void)
 
     const uint32_t saved_fix = REG32(MODEM_WIDGET_DIAG_FIX);
     const uint32_t saved_exchange = REG32(MODEM_WIDGET_DIAG_EXCHANGE);
+    const uint32_t saved_test_conf = REG32(MODEM_SYSCON_TEST_CONF);
     modem_diag_result_t results[MODEM_DIAG_CONFIGS][6] = {0};
+    uint32_t test_conf_by_config[MODEM_DIAG_CONFIGS] = {0};
 
+    const uint32_t saved_mstatus = modem_capture_irq_save_disable();
     err = continuous_iq_start();
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        modem_capture_irq_restore(saved_mstatus);
+        return err;
+    }
 
     for (unsigned config = 0u; config < MODEM_DIAG_CONFIGS; ++config) {
         uint32_t fix = saved_fix;
         uint32_t exchange = saved_exchange;
-        if (config >= 1u) exchange = 2u; /* coex vendor state */
-        if (config >= 2u) {
+        uint32_t test_conf = saved_test_conf;
+        if (config == 1u) exchange = 2u; /* coex vendor state */
+        if (config == 2u) {
+            exchange = 2u;
             /* Final low ten bits produced by C5 bt_bb_ble_diag_all(). */
             fix = (saved_fix & ~0x3ffu) | 0x14eu;
         }
+        if (config == 3u) {
+            /* The output lane is undocumented, so measure all 32 signals. */
+            test_conf |= MODEM_FPGA_DEBUG_CLKSWITCH |
+                         MODEM_FPGA_DEBUG_CLK80;
+        }
         REG32(MODEM_WIDGET_DIAG_FIX) = fix;
         REG32(MODEM_WIDGET_DIAG_EXCHANGE) = exchange;
+        REG32(MODEM_SYSCON_TEST_CONF) = test_conf;
         __asm__ __volatile__("fence iorw, iorw" ::: "memory");
-        c5vrx2_trace_stage_detail(290u + config, ESP_OK, fix, exchange,
-                                  MODEM_DIAG_SAMPLES);
+        test_conf_by_config[config] = REG32(MODEM_SYSCON_TEST_CONF);
 
         for (unsigned batch = 0u; batch < 6u; ++batch) {
             const unsigned first = batch * MODEM_DIAG_LANES;
             modem_diag_route_batch(first);
             results[config][batch] = modem_diag_sample();
+        }
+    }
+
+    REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
+    REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
+    REG32(MODEM_SYSCON_TEST_CONF) = saved_test_conf;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    continuous_iq_stats_t stats;
+    continuous_iq_get_stats(&stats);
+    const esp_err_t stop_err = continuous_iq_stop();
+    modem_capture_irq_restore(saved_mstatus);
+    c5vrx2_trace_stage_detail(390u, stop_err, saved_fix, saved_exchange,
+                              stats.physical_wraps);
+    c5vrx2_trace_stage_detail(391u, ESP_OK, saved_test_conf,
+                              test_conf_by_config[3], MODEM_DIAG_SAMPLES);
+
+    /* Persist results only after MAC ownership has been released. */
+    for (unsigned config = 0u; config < MODEM_DIAG_CONFIGS; ++config) {
+        c5vrx2_trace_stage_detail(392u + config, ESP_OK,
+                                  test_conf_by_config[config], config,
+                                  MODEM_DIAG_SAMPLES);
+        for (unsigned batch = 0u; batch < 6u; ++batch) {
             const modem_diag_result_t *r = &results[config][batch];
             const uint32_t activity =
                 (r->ever_high & 0x3fu) |
                 ((r->ever_low & 0x3fu) << 8) |
                 (((r->ever_high & r->ever_low) & 0x3fu) << 16);
-            const uint32_t stage = 300u + config * 20u + batch * 2u;
+            const uint32_t stage = 400u + config * 12u + batch * 2u;
             c5vrx2_trace_stage_detail(stage, (esp_err_t)activity,
                                       r->transitions[0], r->transitions[1],
                                       r->transitions[2]);
@@ -770,15 +820,6 @@ esp_err_t c5vrx2_modem_diag_diagnostic_run(void)
                                       r->transitions[5]);
         }
     }
-
-    REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
-    REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
-    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
-    continuous_iq_stats_t stats;
-    continuous_iq_get_stats(&stats);
-    const esp_err_t stop_err = continuous_iq_stop();
-    c5vrx2_trace_stage_detail(390u, stop_err, saved_fix, saved_exchange,
-                              stats.physical_wraps);
 
     for (unsigned lane = 0u; lane < MODEM_DIAG_LANES; ++lane) {
         (void)gpio_reset_pin(s_modem_diag_pins[lane]);
@@ -814,7 +855,7 @@ esp_err_t c5vrx2_modem_diag_diagnostic_run(void)
 
 esp_err_t IRAM_ATTR c5vrx2_modem_capture_diagnostic_run(void)
 {
-    uint64_t pin_mask = 0u;
+    uint64_t pin_mask = 1ULL << MODEM_PARLIO_CLOCK_GPIO;
     uint32_t stored_pin_mask = 0u;
     for (unsigned signal = 0u; signal < MODEM_CAPTURE_LANES; ++signal) {
         pin_mask |= 1ULL << s_modem_capture_pins[signal];
@@ -1025,6 +1066,298 @@ cleanup_pins:
         (void)esp_partition_write(failure_partition, 0u, &failure,
                                   sizeof(failure));
     }
+    return err;
+}
+
+esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
+{
+    uint64_t pin_mask = 1ULL << MODEM_PARLIO_CLOCK_GPIO;
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        pin_mask |= 1ULL << s_modem_capture_pins[lane];
+    }
+    const gpio_config_t gpio_cfg = {
+        .pin_bit_mask = pin_mask,
+        .mode = GPIO_MODE_INPUT_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&gpio_cfg);
+    if (err != ESP_OK) return err;
+
+    const uint32_t saved_fix = REG32(MODEM_WIDGET_DIAG_FIX);
+    const uint32_t saved_exchange = REG32(MODEM_WIDGET_DIAG_EXCHANGE);
+    const uint32_t saved_clk_out = GPIO_EXT.pin_ctrl.val;
+    const uint32_t saved_clk_out_enable = PCR.ctrl_clk_out_en.val;
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        esp_rom_gpio_connect_out_signal(s_modem_capture_pins[lane],
+                                         MODEM_DIAG0_IDX +
+                                             s_modem_capture_signals[lane],
+                                         false, false);
+    }
+    /* Unlike MODEM_SYSCON_FPGA_DEBUG_CLK80, the clock-output mux has a
+     * documented GPIO-matrix route. This retained F160M probe established
+     * that a higher requested clock still does not raise C5 PARLIO RX beyond
+     * its approximately 40-MS/s ceiling. Correlation against the RF ring,
+     * never the nominal selector name, decides the actual cadence. */
+    GPIO_EXT.pin_ctrl.clk_out1 = CLKOUT_SIG_PLL_F160M;
+    PCR.ctrl_clk_out_en.clk160_oen = 1u;
+    esp_rom_gpio_connect_out_signal(MODEM_PARLIO_CLOCK_GPIO,
+                                    CLK_OUT_OUT1_IDX, false, false);
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    uint32_t clock_transitions = 0u;
+    uint32_t previous_clock =
+        (REG32(GPIO_IN_REG) >> MODEM_PARLIO_CLOCK_GPIO) & 1u;
+    for (unsigned sample = 0u; sample < 32768u; ++sample) {
+        const uint32_t clock =
+            (REG32(GPIO_IN_REG) >> MODEM_PARLIO_CLOCK_GPIO) & 1u;
+        clock_transitions += clock != previous_clock;
+        previous_clock = clock;
+    }
+    c5vrx2_trace_stage_detail(309u, ESP_OK, saved_clk_out,
+                              GPIO_EXT.pin_ctrl.val,
+                              clock_transitions);
+    c5vrx2_trace_stage_detail(308u, ESP_OK, saved_clk_out_enable,
+                              PCR.ctrl_clk_out_en.val,
+                              REG32(0x600a9c00u));
+
+    modem_capture_header_t prearm = {
+        .magic = MODEM_CAPTURE_MAGIC,
+        .version = 10u,
+        .header_bytes = sizeof(modem_capture_header_t),
+        .raw_words = MODEM_PARLIO_BYTES,
+        .ring_words = C5VRX2_RF_WORDS,
+        .diag_fix = saved_fix,
+        .diag_exchange = saved_exchange,
+        .gpio_mask = MODEM_CAPTURE_PIN_MASK | (1u << MODEM_PARLIO_CLOCK_GPIO),
+        .rf_rate_hz = MODEM_PARLIO_SAMPLE_RATE_HZ,
+    };
+    memset(prearm.gpio_for_diag, 0xff, sizeof(prearm.gpio_for_diag));
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        prearm.gpio_for_diag[s_modem_capture_signals[lane]] =
+            (uint8_t)s_modem_capture_pins[lane];
+    }
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, MODEM_CAPTURE_SUBTYPE, "diagcap");
+    if (!partition) {
+        err = ESP_ERR_NOT_FOUND;
+        goto cleanup_pins_only;
+    }
+    err = esp_partition_erase_range(partition, 0u, partition->size);
+    if (err == ESP_OK) {
+        err = esp_partition_write(partition, 0u, &prearm, sizeof(prearm));
+    }
+    if (err != ESP_OK) goto cleanup_pins_only;
+    c5vrx2_trace_stage_detail(310u, ESP_OK, MODEM_PARLIO_BYTES,
+                              MODEM_PARLIO_SAMPLE_RATE_HZ, 0u);
+
+    parlio_rx_unit_handle_t rx = NULL;
+    parlio_rx_delimiter_handle_t delimiter = NULL;
+    const parlio_rx_unit_config_t rx_cfg = {
+        .trans_queue_depth = 1u,
+        .max_recv_size = MODEM_PARLIO_BYTES,
+        /* The C5 RX driver advertises an external-memory-capable GDMA path;
+         * that path accepts at most a 32-byte burst. This is transfer
+         * granularity only and does not reduce the 80 MHz sample clock. */
+        .dma_burst_size = 32u,
+        .data_width = MODEM_CAPTURE_LANES,
+        .clk_src = PARLIO_CLK_SRC_EXTERNAL,
+        .ext_clk_freq_hz = MODEM_PARLIO_SAMPLE_RATE_HZ,
+        .exp_clk_freq_hz = MODEM_PARLIO_SAMPLE_RATE_HZ,
+        .clk_in_gpio_num = MODEM_PARLIO_CLOCK_GPIO,
+        .clk_out_gpio_num = -1,
+        .valid_gpio_num = -1,
+        .data_gpio_nums = {
+            GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,
+            GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,
+        },
+        .flags = {
+            .free_clk = true,
+            .clk_gate_en = false,
+            .allow_pd = false,
+        },
+    };
+    err = parlio_new_rx_unit(&rx_cfg, &rx);
+    c5vrx2_trace_stage_detail(311u, err, (uint32_t)(uintptr_t)rx, 0u, 0u);
+    if (err != ESP_OK) goto cleanup_pins_only;
+
+    const parlio_rx_soft_delimiter_config_t delimiter_cfg = {
+        .sample_edge = PARLIO_SAMPLE_EDGE_POS,
+        .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
+        .eof_data_len = MODEM_PARLIO_BYTES,
+        .timeout_ticks = 0u,
+    };
+    err = parlio_new_rx_soft_delimiter(&delimiter_cfg, &delimiter);
+    c5vrx2_trace_stage_detail(312u, err,
+                              (uint32_t)(uintptr_t)delimiter, 0u, 0u);
+    if (err != ESP_OK) goto cleanup_rx;
+    err = parlio_rx_unit_enable(rx, true);
+    c5vrx2_trace_stage_detail(313u, err, 0u, 0u, 0u);
+    if (err != ESP_OK) goto cleanup_delimiter;
+
+    memset(s_modem_parlio_capture, 0xa5, sizeof(s_modem_parlio_capture));
+    const parlio_receive_config_t receive_cfg = {
+        .delimiter = delimiter,
+        .flags = {
+            .partial_rx_en = false,
+            .indirect_mount = false,
+        },
+    };
+    err = parlio_rx_unit_receive(rx, s_modem_parlio_capture,
+                                 sizeof(s_modem_parlio_capture),
+                                 &receive_cfg);
+    c5vrx2_trace_stage_detail(314u, err, PARL_IO.rx_mode_cfg.val,
+                              PARL_IO.rx_clk_cfg.val, PARL_IO.int_raw.val);
+    if (err != ESP_OK) goto cleanup_enabled_rx;
+    c5vrx2_trace_stage_detail(315u, ESP_OK, PARL_IO.rx_mode_cfg.val,
+                              PARL_IO.rx_clk_cfg.val, PARL_IO.int_raw.val);
+
+    const uint32_t saved_mstatus = modem_capture_irq_save_disable();
+    continuous_iq_debug_mark(440u);
+    err = continuous_iq_start();
+    if (err != ESP_OK) {
+        modem_capture_irq_restore(saved_mstatus);
+        goto cleanup_enabled_rx;
+    }
+    continuous_iq_debug_mark(441u);
+
+    const uint32_t capture_begin = esp_cpu_get_cycle_count();
+    PARL_IO.rx_mode_cfg.rx_sw_en = 1u;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    const uint32_t capture_wait_cycles =
+        MODEM_PARLIO_CAPTURE_US * CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+    while ((uint32_t)(esp_cpu_get_cycle_count() - capture_begin) <
+           capture_wait_cycles) {
+        __asm__ __volatile__("nop");
+    }
+    PARL_IO.rx_mode_cfg.rx_sw_en = 0u;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+    const uint32_t capture_cycles =
+        esp_cpu_get_cycle_count() - capture_begin;
+    continuous_iq_debug_mark(442u);
+
+    continuous_iq_stats_t stats;
+    continuous_iq_get_stats(&stats);
+    const uint32_t capture_end_ptr_mode = REG32(DUMP_PTR_MODE);
+    const uint32_t capture_end_pointer = capture_end_ptr_mode & PTR_MASK;
+    const uint32_t parlio_int_raw = PARL_IO.int_raw.val;
+    const uint32_t parlio_rx_st0 = PARL_IO.rx_st0.val;
+    const uint32_t parlio_rx_st1 = PARL_IO.rx_st1.val;
+    const uint32_t stop_begin = esp_cpu_get_cycle_count();
+    const esp_err_t stop_err = continuous_iq_stop();
+    const uint32_t stop_cycles = esp_cpu_get_cycle_count() - stop_begin;
+    modem_capture_irq_restore(saved_mstatus);
+    continuous_iq_debug_mark(443u);
+    if (stop_err != ESP_OK) {
+        err = stop_err;
+        goto cleanup_enabled_rx;
+    }
+
+    const esp_err_t receive_err = parlio_rx_unit_wait_all_done(rx, 100u);
+    const esp_err_t disable_err = parlio_rx_unit_disable(rx);
+    if (receive_err != ESP_OK) err = receive_err;
+    else if (disable_err != ESP_OK) err = disable_err;
+
+    REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
+    REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+
+    const uint32_t stop_ptr_mode = REG32(DUMP_PTR_MODE);
+    const uint32_t stop_pointer = stop_ptr_mode & PTR_MASK;
+    const void *ring = continuous_iq_ring_base();
+    modem_capture_header_t header = {
+        .magic = MODEM_CAPTURE_MAGIC,
+        .version = 7u,
+        .header_bytes = sizeof(modem_capture_header_t),
+        .raw_words = MODEM_PARLIO_BYTES,
+        .ring_words = C5VRX2_RF_WORDS,
+        .diag_fix = saved_fix,
+        .diag_exchange = saved_exchange,
+        .gpio_mask = MODEM_CAPTURE_PIN_MASK | (1u << MODEM_PARLIO_CLOCK_GPIO),
+        .sample_us = (uint32_t)(((uint64_t)MODEM_PARLIO_BYTES * 1000000u) /
+                                MODEM_PARLIO_SAMPLE_RATE_HZ),
+        .rf_rate_hz = stats.rf_sample_rate_hz,
+        .writer_pointer = stop_pointer,
+        .dump_control = stats.dump_control,
+        .dump_ptr_mode = stop_ptr_mode,
+        .producer_starts = stats.producer_start_count,
+        .physical_wraps = stats.physical_wraps,
+        .trigger_count = stats.trigger_count,
+        .raw_hash = fnv1a_hash(s_modem_parlio_capture,
+                               sizeof(s_modem_parlio_capture)),
+        .ring_hash = fnv1a_hash(ring, continuous_iq_ring_bytes()),
+        .capture_end_pointer = capture_end_pointer,
+        .capture_end_ptr_mode = capture_end_ptr_mode,
+        .stop_us = stop_cycles / CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+    };
+    memset(header.gpio_for_diag, 0xff, sizeof(header.gpio_for_diag));
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        header.gpio_for_diag[s_modem_capture_signals[lane]] =
+            (uint8_t)s_modem_capture_pins[lane];
+    }
+    memcpy(header.reserved, &capture_cycles, sizeof(capture_cycles));
+    memcpy(header.reserved + 4u, &parlio_int_raw, sizeof(parlio_int_raw));
+    memcpy(header.reserved + 8u, &parlio_rx_st0, sizeof(parlio_rx_st0));
+    memcpy(header.reserved + 12u, &parlio_rx_st1, sizeof(parlio_rx_st1));
+    memcpy(header.reserved + 16u, &receive_err, sizeof(receive_err));
+    const uint32_t sample_rate_hz = MODEM_PARLIO_SAMPLE_RATE_HZ;
+    memcpy(header.reserved + 20u, &sample_rate_hz, sizeof(sample_rate_hz));
+
+    const size_t raw_offset = sizeof(header);
+    const size_t ring_offset = raw_offset + sizeof(s_modem_parlio_capture);
+    const size_t required = ring_offset + continuous_iq_ring_bytes();
+    if (required > partition->size) {
+        err = ESP_ERR_INVALID_SIZE;
+    } else {
+        esp_err_t write_err = esp_partition_erase_range(partition, 0u,
+                                                        partition->size);
+        if (write_err == ESP_OK) {
+            write_err = esp_partition_write(partition, raw_offset,
+                                             s_modem_parlio_capture,
+                                             sizeof(s_modem_parlio_capture));
+        }
+        if (write_err == ESP_OK) {
+            write_err = esp_partition_write(partition, ring_offset, ring,
+                                             continuous_iq_ring_bytes());
+        }
+        if (write_err == ESP_OK) {
+            write_err = esp_partition_write(partition, 0u, &header,
+                                             sizeof(header));
+        }
+        if (err == ESP_OK) err = write_err;
+    }
+
+    ESP_LOGW(TAG,
+             "MODEM PARLIO result=%s bytes=%u clock=%u rf_hz=%u "
+             "capture_ptr=%u stop_ptr=%u starts=%u wraps=%u triggers=%u "
+             "int_raw=%08x rx_st0=%08x rx_st1=%08x",
+             esp_err_to_name(err), MODEM_PARLIO_BYTES,
+             MODEM_PARLIO_SAMPLE_RATE_HZ,
+             (unsigned)stats.rf_sample_rate_hz, capture_end_pointer,
+             stop_pointer, (unsigned)stats.producer_start_count,
+             (unsigned)stats.physical_wraps, (unsigned)stats.trigger_count,
+             (unsigned)parlio_int_raw, (unsigned)parlio_rx_st0,
+             (unsigned)parlio_rx_st1);
+
+    if (delimiter) (void)parlio_del_rx_delimiter(delimiter);
+    if (rx) (void)parlio_del_rx_unit(rx);
+    goto cleanup_pins_only;
+
+cleanup_enabled_rx:
+    (void)parlio_rx_unit_disable(rx);
+cleanup_delimiter:
+    if (delimiter) (void)parlio_del_rx_delimiter(delimiter);
+cleanup_rx:
+    if (rx) (void)parlio_del_rx_unit(rx);
+cleanup_pins_only:
+    REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
+    REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
+    GPIO_EXT.pin_ctrl.val = saved_clk_out;
+    PCR.ctrl_clk_out_en.val = saved_clk_out_enable;
+    for (unsigned lane = 0u; lane < MODEM_CAPTURE_LANES; ++lane) {
+        (void)gpio_reset_pin(s_modem_capture_pins[lane]);
+    }
+    (void)gpio_reset_pin(MODEM_PARLIO_CLOCK_GPIO);
     return err;
 }
 

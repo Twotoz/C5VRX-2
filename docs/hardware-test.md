@@ -47,12 +47,13 @@ bytes against the post-stop Q10/I10 ring. The VTX-OFF run matched 95.50% and
 822/900 bytes. Both measured about 79.994 MS/s, one producer start, 19 wraps
 and zero triggers. Use `tools/analyze_modem_capture.py` to reproduce this.
 
-## 5. Source-synchronous PARLIO RX clock
+## 5. Long-duration 80-to-40 PARLIO acquisition
 
-Route the matching modem sample/debug clock
-to the reserved GPIO2 and capture through PARLIO RX. Do not substitute an
-unrelated nominal 80 MHz system clock. Verify RX DMA has no missing, duplicated
-or phase-slipping samples.
+The bounded probe captured a bit-perfect sequence of every second MODEM sample
+at about 40 MS/s. Soak the same mapping for minutes and compare periodic
+snapshots against the dump timeline. Verify there is no occasional duplicate,
+skip, or sampling-phase slip. An actual MODEM-derived 80-MHz receive clock is
+an optional future upgrade, not a claim made by the current firmware.
 
 ## 6. Physical IQ-wrap continuity
 
@@ -63,9 +64,8 @@ cannot supply this proof; its output must not be accepted as gapless evidence.
 
 ## 7. Live recovered CVBS
 
-Do not use the stale MAC-owned SRAM view for this test. The default LIVE mode is
-intentionally blocked and displays synthetic PAL bars until a simultaneous
-live-readable IQ source is proven. The MODEM_DIAG Q4/I4 mapping has passed;
-complete the source-synchronous PARLIO-RX clock and RX/TX boundary tests. Then repeat
-VTX OFF -> ON -> OFF and verify recovered sync, blanking, burst and picture on
-a scope/decoder.
+Do not use the stale MAC-owned SRAM view for this test. The default LIVE mode
+uses MODEM_DIAG Q4/I4 -> infinite PARLIO RX -> adjacent FM -> real 2:1 boxcar
+-> continuous PARLIO TX. Repeat VTX OFF -> ON -> OFF and verify recovered sync,
+blanking, burst and picture on a scope/decoder. Separately verify both cyclic
+DMA boundaries introduce no missing, duplicated or stretched DAC sample.

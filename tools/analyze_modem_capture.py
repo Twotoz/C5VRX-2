@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Correlate a MODEM_CAPTURE GPIO trace with its post-stop Q10/I10 ring.
+"""Correlate a MODEM_CAPTURE GPIO/PARLIO trace with its Q10/I10 ring.
 
-The firmware stores 4096 raw GPIO_IN words followed by the 16384-word RF dump
-ring.  GPIO capture is asynchronous and much slower than RF, so this tool
-searches the small timing-ratio uncertainty and every circular ring offset.
+Version 1 stores raw GPIO_IN words sampled by the CPU. Later versions store
+packed Q4/I4 bytes acquired by PARLIO RX. Those tests requested several clock
+sources, but physical correlation showed the C5 receive path accepting about
+40 MS/s in each successful case. Both forms are followed by the 16384-word
+post-stop RF dump ring. The tool searches timing-ratio uncertainty and every
+circular ring offset rather than assuming the two engines started together.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ HEADER_WORDS = 21
 HEADER_BYTES = 128
 GPIO_PINS = (1, 0, 25, 7, 10, 5, 3, 4)
 EXPECTED_BITS = (6, 7, 8, 9, 16, 17, 18, 19)
+PARLIO_RATES_HZ = {version: 40_000_000.0 for version in (4, 5, 6, 7)}
 
 
 def load_capture(path: Path) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
@@ -31,16 +35,24 @@ def load_capture(path: Path) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
         "ring_hash", "capture_end_pointer", "capture_end_ptr_mode", "stop_us",
     )
     header = dict(zip(names, struct.unpack_from("<21I", blob)))
-    if header["magic"] != MAGIC or header["version"] != 1:
-        raise ValueError("capture is not a complete version-1 MODEM_CAPTURE")
+    if header["magic"] != MAGIC or header["version"] not in (1, 4, 5, 6, 7):
+        raise ValueError(
+            "capture is not a complete MODEM_CAPTURE (v1/v4/v5/v6/v7)")
     if header["header_bytes"] != HEADER_BYTES:
         raise ValueError("unsupported capture header size")
+    if header["version"] != 1:
+        receive_error = struct.unpack_from("<i", blob, 120)[0]
+        if receive_error:
+            raise ValueError(
+                f"PARLIO capture did not complete (esp_err=0x{receive_error:x})")
     raw_offset = header["header_bytes"]
-    ring_offset = raw_offset + header["raw_words"] * 4
+    raw_item_bytes = 4 if header["version"] == 1 else 1
+    ring_offset = raw_offset + header["raw_words"] * raw_item_bytes
     needed = ring_offset + header["ring_words"] * 4
     if len(blob) < needed:
         raise ValueError("capture file is truncated")
-    raw = np.frombuffer(blob, dtype="<u4", count=header["raw_words"],
+    raw_dtype = "<u4" if header["version"] == 1 else "u1"
+    raw = np.frombuffer(blob, dtype=raw_dtype, count=header["raw_words"],
                         offset=raw_offset).copy()
     ring = np.frombuffer(blob, dtype="<u4", count=header["ring_words"],
                          offset=ring_offset).copy()
@@ -57,8 +69,13 @@ def pack_gpio(raw: np.ndarray) -> np.ndarray:
 def correlate(header: dict[str, int], captured: np.ndarray,
               ring: np.ndarray, samples: int, width: float,
               steps: int) -> tuple[float, float, int, np.ndarray, np.ndarray]:
+    if header["version"] in PARLIO_RATES_HZ:
+        gpio_rate = PARLIO_RATES_HZ[header["version"]]
+    else:
+        gpio_rate = captured.size / header["sample_us"] * 1_000_000.0
+    nominal = header["rf_rate_hz"] / gpio_rate
     samples = min(samples, captured.size,
-                  int((ring.size - 1) / 17.0))
+                  int((ring.size - 1) / max(nominal, 1.0)))
     if samples < 64:
         raise ValueError("not enough overlapping samples")
 
@@ -70,8 +87,6 @@ def correlate(header: dict[str, int], captured: np.ndarray,
                  for bit in EXPECTED_BITS]
     ring_fft = [np.fft.fft(bits.astype(float)) for bits in ring_bits]
 
-    gpio_rate = captured.size / header["sample_us"] * 1_000_000.0
-    nominal = header["rf_rate_hz"] / gpio_rate
     best = (-2.0, nominal, 0)
     for slope in np.linspace(nominal - width, nominal + width, steps):
         positions = (-np.rint(slope * np.arange(samples)).astype(int)) % ring.size
@@ -96,15 +111,19 @@ def correlate(header: dict[str, int], captured: np.ndarray,
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("capture", type=Path)
-    parser.add_argument("--samples", type=int, default=900)
-    parser.add_argument("--search-width", type=float, default=0.15)
+    parser.add_argument("--samples", type=int, default=0)
+    parser.add_argument("--search-width", type=float)
     parser.add_argument("--steps", type=int, default=1201)
     args = parser.parse_args()
 
     header, raw, ring = load_capture(args.capture)
-    captured = pack_gpio(raw)
+    captured = pack_gpio(raw) if header["version"] == 1 else raw
+    samples = args.samples or (900 if header["version"] == 1 else 1800)
+    search_width = args.search_width
+    if search_width is None:
+        search_width = 0.15 if header["version"] == 1 else 0.003
     score, slope, offset, observed, reference = correlate(
-        header, captured, ring, args.samples, args.search_width, args.steps)
+        header, captured, ring, samples, search_width, args.steps)
     xor = observed ^ reference
     bit_accuracy = (1.0 -
                     sum(int(value).bit_count() for value in xor) /
@@ -113,6 +132,7 @@ def main() -> None:
     pipeline_offset = ((header["capture_end_pointer"] - offset) % ring.size)
 
     print(f"RF rate:             {header['rf_rate_hz']} samples/s")
+    print(f"capture transport:   {'CPU GPIO' if header['version'] == 1 else 'PARLIO RX'}")
     print(f"producer/wraps/trig: {header['producer_starts']}/"
           f"{header['physical_wraps']}/{header['trigger_count']}")
     print("mapping:             DIAG[6:9]=Q[6:9], DIAG[16:19]=I[6:9]")
