@@ -1,69 +1,68 @@
-# Continuous MODEM_DIAG Q4/I4 -> adjacent WBFM -> real 2:1 boxcar.
+# Continuous packed Q4/I4 -> full-byte phase LUT -> adjacent WBFM -> real /2.
 #
-# PARLIO RX packs one sample as Q[9:6] in bits 3:0 and I[9:6] in bits
-# 7:4.  Every acquired complex sample participates in an adjacent phase
-# difference.  Two real discriminator results are averaged only after FM,
-# producing one six-bit CVBS DAC code for every two 40-MS/s input samples.
+# Each input byte is Q[9:6] in bits 3:0 and I[9:6] in bits 7:4. The 16-bit
+# LUT maps the complete byte to:
 #
-# The 8-bit LUT is addressed by output bits 31..21 from the PREVIOUS
-# instruction. Therefore each discriminator sample needs an address cycle
-# followed by a separate cycle that routes L0..L7 into bits 16..23 for
-# ADDCTIAL. Odd/even samples alternate Q3/I2 and Q2/I3 quantizers so the
-# 2048-byte LUT can encode both current and previous phase buckets.
+#   L0..L7   = calibrated absolute phase
+#   L8..L15  = pedestal - calibrated absolute phase
 #
-# O0..O4 carry the compact current sample across its LUT-add cycle. O8..O12
-# carry the second sample across the emit cycle and become the previous
-# sample for the next pair. This state survives ordinary GDMA/ring boundaries.
+# Adding the low byte for the current sample and the saved high byte for the
+# previous sample gives pedestal + phase[n] - phase[n-1], modulo eight bits.
+# Two genuine adjacent discriminator results are accumulated and only then
+# averaged to one six-bit 20-MS/s CVBS sample.
+#
+# O8..O15 retains pedestal-phase[n-1] across every normal GDMA ring wrap.
 
-cfg prefetch false
+cfg prefetch true
 cfg eof_on downstream
 cfg trailing_bytes 0
-cfg lut_width_bits 8
-
-init:
-    # read 8 places the byte in I56..I63. Prime previous to zero in O8..O12.
-    read 8,
-    set 8..12 L,
-    LDCTDAL 40
+cfg lut_width_bits 16
 
 address1:
-    # Current Q3/I2, previous Q2/I3. Bank 1 means current_q_fine=true.
+    # LUT address bits are output bits 31..22 from this cycle. Preserve the
+    # previous biased-negative phase in O8..O15 while prefetching sample 2.
+    # Reset A here once per pair, avoiding a ninth C5 instruction.
+    set 8..15 O8..O15,
+    set 22..29 56..63,
+    set 30..31 L,
     read 8,
-    set 0..2 57..59,
-    set 3..4 62..63,
-    set 21..23 57..59,
-    set 24..25 62..63,
-    set 26..30 O8..O12,
-    set 31 H
+    LDCTDAL 0
 
-add1:
-    # LUT output for address1 is available now. Preserve sample 1 in O0..O4.
-    set 0..4 O0..O4,
+add_current1:
+    set 0..7 L8..L15,
+    set 8..15 O8..O15,
     set 16..23 L0..L7,
+    ADDCTIAL
+
+add_previous1:
+    set 0..7 O0..O7,
+    set 16..23 O8..O15,
     ADDCTIAL
 
 address2:
-    # Current Q2/I3, previous Q3/I2. Bank 0 means current_q_fine=false.
-    read 8,
-    set 0..1 58..59,
-    set 2..4 61..63,
-    set 21..22 58..59,
-    set 23..25 61..63,
-    set 26..30 O0..O4,
-    set 31 L
+    # Sample 1 is now the previous sample. Address sample 2 and prefetch the
+    # first byte of the next pair.
+    set 8..15 O0..O7,
+    set 22..29 56..63,
+    set 30..31 L,
+    read 8
 
-add2:
-    # LUT output for address2 is available now. Preserve sample 2 in O0..O4.
-    set 0..4 O0..O4,
+add_current2:
+    set 0..7 L8..L15,
+    set 8..15 O8..O15,
     set 16..23 L0..L7,
     ADDCTIAL
 
+add_previous2:
+    set 0..7 O0..O7,
+    set 16..23 O8..O15,
+    ADDCTIAL
+
 emit:
-    # Divide the two-term real accumulator by two. Carry sample 2 across this
-    # write so address1 can use it as the next pair's previous sample.
+    # Divide the two-result real boxcar by two and retain sample 2's phase
+    # state in O8..O15 across the write cycle.
     set 0..5 A1..A6,
     set 6..7 L,
-    set 8..12 O0..O4,
+    set 8..15 O0..O7,
     write 8,
-    LDCTDAL 40
     jmp address1
