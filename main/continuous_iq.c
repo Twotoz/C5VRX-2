@@ -24,7 +24,15 @@
 #define TX_START_SELECT 0x00060000u
 
 #define READER_GUARD_WORDS 256u
+#if CONFIG_C5VRX2_MODE_MODEM_PARLIO
+/* The PARLIO proof masks interrupts while MAC owns the dump SRAM. Keep its
+ * rate measurement plus long capture comfortably below the observed ~5 ms
+ * CPU-lockup boundary. Half a millisecond still observes about 40 RF-ring
+ * wraps and is ample for a diagnostic cadence estimate. */
+#define RATE_MEASURE_US     500u
+#else
 #define RATE_MEASURE_US    4000u
+#endif
 #define OBSERVER_PERIOD_US 50u
 #define CPU_CYCLES_PER_US  CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
 
