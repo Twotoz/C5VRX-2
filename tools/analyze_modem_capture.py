@@ -108,6 +108,64 @@ def correlate(header: dict[str, int], captured: np.ndarray,
     return score, slope, offset, observed, reference
 
 
+def sign_extend_nibble(value: np.ndarray) -> np.ndarray:
+    """Convert an unsigned four-bit lane to signed Q4/I4 values."""
+    value = value.astype(np.int16)
+    return np.where(value & 0x08, value - 16, value).astype(np.float64)
+
+
+def analyze_cvbs(captured: np.ndarray, sample_rate_hz: float) -> None:
+    """Look for PAL line-period structure in exact adjacent-sample FM.
+
+    This deliberately runs before any DAC gain, polarity, or clamping.  A
+    strong line-period correlation here proves that recovered composite-video
+    timing exists in the captured IQ; its absence keeps the fault upstream of
+    PARLIO TX and the resistor DAC.
+    """
+    if captured.size < 8192:
+        print("CVBS analysis:       capture too short")
+        return
+
+    q = sign_extend_nibble(captured & 0x0f)
+    i = sign_extend_nibble((captured >> 4) & 0x0f)
+    # arg(x[n] * conj(x[n-1])) without any phase unwrap ambiguity.
+    cross = q[1:] * i[:-1] - i[1:] * q[:-1]
+    dot = i[1:] * i[:-1] + q[1:] * q[:-1]
+    fm = np.arctan2(cross, dot)
+
+    # A short real-domain boxcar suppresses quantisation/RF noise while
+    # retaining far more than the bandwidth required to find line sync.
+    filtered = np.convolve(fm, np.ones(8) / 8.0, mode="valid")
+    filtered -= np.mean(filtered)
+    rms = float(np.sqrt(np.mean(filtered * filtered)))
+    if rms == 0.0:
+        print("CVBS analysis:       zero discriminator output")
+        return
+
+    pal_period = sample_rate_hz / 15625.0
+    lo = max(1, int(pal_period - 24))
+    hi = int(pal_period + 24)
+    best_corr = -2.0
+    best_lag = 0
+    for lag in range(lo, hi + 1):
+        left = filtered[:-lag]
+        right = filtered[lag:]
+        denom = float(np.sqrt(np.dot(left, left) * np.dot(right, right)))
+        corr = float(np.dot(left, right) / denom) if denom else 0.0
+        if corr > best_corr:
+            best_corr = corr
+            best_lag = lag
+
+    zero_iq = int(np.count_nonzero((i == 0) & (q == 0)))
+    print(f"Q4/I4 unique bytes:  {np.unique(captured).size}/256")
+    print(f"zero-IQ samples:     {zero_iq}/{captured.size} "
+          f"({zero_iq / captured.size:.3%})")
+    print(f"FM filtered RMS:     {rms:.6f} rad/sample")
+    print(f"PAL best period:     {best_lag} samples "
+          f"({sample_rate_hz / best_lag:.3f} Hz)")
+    print(f"PAL line correlation:{best_corr: .6f}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("capture", type=Path)
@@ -137,11 +195,15 @@ def main() -> None:
           f"{header['physical_wraps']}/{header['trigger_count']}")
     print("mapping:             DIAG[6:9]=Q[6:9], DIAG[16:19]=I[6:9]")
     print(f"RF/GPIO ratio:       {slope:.6f}")
+    measured_capture_rate = header["rf_rate_hz"] / slope
+    print(f"capture sample rate: {measured_capture_rate:.3f} samples/s")
     print(f"pipeline offset:     {pipeline_offset} RF samples")
     print(f"correlation:         {score:.6f}")
     print(f"bit accuracy:        {bit_accuracy:.4%}")
     print(f"exact bytes:         {np.sum(observed == reference)}/"
           f"{observed.size} ({exact:.4%})")
+    if header["version"] != 1:
+        analyze_cvbs(captured, measured_capture_rate)
 
 
 if __name__ == "__main__":

@@ -59,9 +59,9 @@
 #define MODEM_DIAG_CONFIGS               4u
 #define MODEM_CAPTURE_WORDS            4096u
 #define MODEM_CAPTURE_LANES                8u
-#define MODEM_PARLIO_BYTES             2048u
+#define MODEM_PARLIO_BYTES            49152u
 #define MODEM_PARLIO_SAMPLE_RATE_HZ   80000000u
-#define MODEM_PARLIO_CAPTURE_US           35u
+#define MODEM_PARLIO_CAPTURE_US         1400u
 #define MODEM_PARLIO_CLOCK_GPIO       GPIO_NUM_2
 #define MODEM_CAPTURE_MAGIC       0x5043444du
 #define MODEM_CAPTURE_SUBTYPE ((esp_partition_subtype_t)0x42)
