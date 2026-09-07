@@ -207,11 +207,33 @@ static void telemetry_task(void *argument)
         const uint32_t control = reg32(DUMP_CTRL);
         if (current == previous) stalls++;
         previous = current;
+
+        /* Read-only proof that the RX BitScrambler is continuously replacing
+         * the initial pedestal bytes. Sampling ordinary internal DMA SRAM is
+         * non-intrusive; this does not synchronize, stop or rearm either DMA. */
+        uint32_t sum = 0u;
+        uint32_t transitions = 0u;
+        uint32_t non_pedestal = 0u;
+        uint8_t minimum = UINT8_MAX;
+        uint8_t maximum = 0u;
+        uint8_t last = *(volatile uint8_t *)&s_cvbs_ring[0];
+        for (size_t i = 0u; i < sizeof(s_cvbs_ring); ++i) {
+            const uint8_t sample = *(volatile uint8_t *)&s_cvbs_ring[i];
+            if (sample < minimum) minimum = sample;
+            if (sample > maximum) maximum = sample;
+            sum += sample;
+            non_pedestal += sample != c5vrx2_calibration_get()->pedestal_code;
+            transitions += i != 0u && sample != last;
+            last = sample;
+        }
         ESP_LOGI(TAG,
                  "LIVE iq_in=40M cvbs_out=20M ptr=%u enable=%u done=%u "
-                 "stalls=%u starts=1 rearms=0",
+                 "stalls=%u starts=1 rearms=0 cvbs_min=%u cvbs_max=%u "
+                 "cvbs_avg=%u cvbs_nonped=%u cvbs_changes=%u",
                  (unsigned)current, (control & CTRL_ENABLE) != 0u,
-                 (control & CTRL_DONE) != 0u, (unsigned)stalls);
+                 (control & CTRL_DONE) != 0u, (unsigned)stalls,
+                 minimum, maximum, (unsigned)(sum / sizeof(s_cvbs_ring)),
+                 (unsigned)non_pedestal, (unsigned)transitions);
     }
 }
 

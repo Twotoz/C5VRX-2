@@ -4,12 +4,13 @@
 # LUT maps the complete byte to:
 #
 #   L0..L7   = calibrated absolute phase
-#   L8..L15  = pedestal - calibrated absolute phase
+#   L8..L15  = -calibrated absolute phase
 #
 # Adding the low byte for the current sample and the saved high byte for the
-# previous sample gives pedestal + phase[n] - phase[n-1], modulo eight bits.
-# Two genuine adjacent discriminator results are accumulated and only then
-# averaged to one six-bit 20-MS/s CVBS sample.
+# previous sample gives phase[n] - phase[n-1], modulo eight bits. Two genuine
+# adjacent discriminator results are accumulated. LUT bank 1 then interprets
+# that modulo sum as signed, averages it, adds the calibrated pedestal, and
+# clamps the result to a legal six-bit DAC code.
 #
 # O8..O15 retains pedestal-phase[n-1] across every normal GDMA ring wrap.
 
@@ -58,11 +59,19 @@ add_previous2:
     set 16..23 O8..O15,
     ADDCTIAL
 
-emit:
-    # Divide the two-result real boxcar by two and retain sample 2's phase
-    # state in O8..O15 across the write cycle.
-    set 0..5 A1..A6,
-    set 6..7 L,
+map_cvbs:
+    # Select LUT bank 1 (indices 0x100..0x1ff) with the low accumulator byte.
+    # Preserve sample 2 as the previous phase for the next pair.
     set 8..15 O0..O7,
+    set 22..29 A0..A7,
+    set 30 H,
+    set 31 L
+
+emit:
+    # The LUT has already applied /2, pedestal and saturation. Retain sample
+    # 2's phase state in O8..O15 across the write cycle.
+    set 0..5 L0..L5,
+    set 6..7 L,
+    set 8..15 O8..O15,
     write 8,
     jmp address1

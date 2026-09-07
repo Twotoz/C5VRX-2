@@ -34,21 +34,40 @@ static int q4_phase8(unsigned packed)
     return phase8;
 }
 
+static int scale_phase(int phase, unsigned calibration_gain)
+{
+    /* At the coherent 40-MS/s input the adjacent phase step is twice the
+     * historical 80-MS/s step. Preserve the half-step represented by an
+     * even calibration setting instead of truncating 3/2 back to 1. */
+    const int numerator = (int)calibration_gain + 1;
+    const int magnitude = abs(phase);
+    const int scaled = (magnitude * numerator + 1) / 2;
+    return phase < 0 ? -scaled : scaled;
+}
+
 static void build_lut(uint16_t lut[LUT_ITEMS])
 {
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
-    int gain = ((int)cal->discriminator_gain + 1) / 2;
-    if (gain < 1) gain = 1;
-
     for (unsigned index = 0; index < LUT_ITEMS; ++index) {
-        int phase = q4_phase8(index & 0xffu) * gain;
-        if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
-            phase = -phase;
-        const uint8_t phase_mod = (uint8_t)phase;
-        const uint8_t biased_negative =
-            (uint8_t)((unsigned)cal->pedestal_code - phase_mod);
-        lut[index] = (uint16_t)phase_mod |
-                     ((uint16_t)biased_negative << 8u);
+        if (index < 0x100u) {
+            int phase = scale_phase(q4_phase8(index),
+                                    cal->discriminator_gain);
+            if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
+                phase = -phase;
+            const uint8_t phase_mod = (uint8_t)phase;
+            const uint8_t negative_phase = (uint8_t)(0u - phase_mod);
+            lut[index] = (uint16_t)phase_mod |
+                         ((uint16_t)negative_phase << 8u);
+        } else if (index < 0x200u) {
+            int sum = (int)(index & 0xffu);
+            if (sum >= 128) sum -= 256;
+            int code = (int)cal->pedestal_code + sum / 2;
+            if (code < 0) code = 0;
+            if (code > 63) code = 63;
+            lut[index] = (uint16_t)(uint8_t)code;
+        } else {
+            lut[index] = 0u;
+        }
     }
 }
 
