@@ -5,9 +5,15 @@
 # difference.  Two real discriminator results are averaged only after FM,
 # producing one six-bit CVBS DAC code for every two 40-MS/s input samples.
 #
-# O6..O10 retain the compact previous IQ state across every output and GDMA
-# descriptor wrap. Odd/even samples alternate Q3/I2 and Q2/I3 quantizers;
-# LUT address bit 10 identifies the current mapping.
+# The 8-bit LUT is addressed by output bits 31..21 from the PREVIOUS
+# instruction. Therefore each discriminator sample needs an address cycle
+# followed by a separate cycle that routes L0..L7 into bits 16..23 for
+# ADDCTIAL. Odd/even samples alternate Q3/I2 and Q2/I3 quantizers so the
+# 2048-byte LUT can encode both current and previous phase buckets.
+#
+# O0..O4 carry the compact current sample across its LUT-add cycle. O8..O12
+# carry the second sample across the emit cycle and become the previous
+# sample for the next pair. This state survives ordinary GDMA/ring boundaries.
 
 cfg prefetch false
 cfg eof_on downstream
@@ -15,38 +21,49 @@ cfg trailing_bytes 0
 cfg lut_width_bits 8
 
 init:
-    # read 8 places the byte in I56..I63. Prime previous as Q2/I3.
+    # read 8 places the byte in I56..I63. Prime previous to zero in O8..O12.
     read 8,
-    set 6..7 58..59,
-    set 8..10 61..63,
+    set 8..12 L,
     LDCTDAL 40
 
-sample1:
-    # Current Q3/I2, previous Q2/I3, LUT bank 0.
+address1:
+    # Current Q3/I2, previous Q2/I3. Bank 1 means current_q_fine=true.
     read 8,
-    set 6..8 57..59,
-    set 9..10 62..63,
+    set 0..2 57..59,
+    set 3..4 62..63,
     set 21..23 57..59,
     set 24..25 62..63,
-    set 26..30 O6..O10,
-    set 31 L,
+    set 26..30 O8..O12,
+    set 31 H
+
+add1:
+    # LUT output for address1 is available now. Preserve sample 1 in O0..O4.
+    set 0..4 O0..O4,
+    set 16..23 L0..L7,
     ADDCTIAL
 
-sample2:
-    # Current Q2/I3, previous Q3/I2, LUT bank 1.
+address2:
+    # Current Q2/I3, previous Q3/I2. Bank 0 means current_q_fine=false.
     read 8,
-    set 6..7 58..59,
-    set 8..10 61..63,
+    set 0..1 58..59,
+    set 2..4 61..63,
     set 21..22 58..59,
     set 23..25 61..63,
-    set 26..30 O6..O10,
-    set 31 H,
+    set 26..30 O0..O4,
+    set 31 L
+
+add2:
+    # LUT output for address2 is available now. Preserve sample 2 in O0..O4.
+    set 0..4 O0..O4,
+    set 16..23 L0..L7,
     ADDCTIAL
 
 emit:
-    # Divide the two-term real accumulator by two. Upper output bits stay 0.
+    # Divide the two-term real accumulator by two. Carry sample 2 across this
+    # write so address1 can use it as the next pair's previous sample.
     set 0..5 A1..A6,
     set 6..7 L,
+    set 8..12 O0..O4,
     write 8,
     LDCTDAL 40
-    jmp sample1
+    jmp address1
