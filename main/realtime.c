@@ -20,6 +20,7 @@
 
 #include "calibration.h"
 #include "continuous_iq.h"
+#include "startup_trace.h"
 #include "wbfm_q4.h"
 
 #define MODEM_IQ_RATE_HZ 40000000u
@@ -51,6 +52,12 @@ static parlio_rx_unit_handle_t s_rx;
 static parlio_rx_delimiter_handle_t s_rx_delimiter;
 static parlio_tx_unit_handle_t s_tx;
 static bitscrambler_handle_t s_rx_bs;
+
+static esp_err_t trace_step(uint32_t stage, esp_err_t err)
+{
+    c5vrx2_trace_stage(stage, err);
+    return err;
+}
 
 static inline uint32_t reg32(uint32_t address)
 {
@@ -103,28 +110,37 @@ static esp_err_t prepare_rx(void)
         },
     };
     esp_err_t err = parlio_new_rx_unit(&cfg, &s_rx);
-    if (err != ESP_OK) return err;
+    if (trace_step(11u, err) != ESP_OK) return err;
 
     const parlio_rx_soft_delimiter_config_t delimiter_cfg = {
         .sample_edge = PARLIO_SAMPLE_EDGE_POS,
         .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
-        .eof_data_len = 0u,
+        /* IDF requires a non-zero soft-delimiter length even for an
+         * infinite (partial_rx_en) transaction. In infinite mode this only
+         * marks recurring receive boundaries; the cyclic GDMA link keeps
+         * running and is not rearmed by software. */
+        .eof_data_len = sizeof(s_cvbs_ring),
         .timeout_ticks = 0u,
     };
     err = parlio_new_rx_soft_delimiter(&delimiter_cfg, &s_rx_delimiter);
-    if (err != ESP_OK) return err;
+    if (trace_step(12u, err) != ESP_OK) return err;
 
     const bitscrambler_config_t bs_cfg = {
         .dir = BITSCRAMBLER_DIR_RX,
         .attach_to = SOC_BITSCRAMBLER_ATTACH_PARL_IO,
     };
     err = bitscrambler_new(&bs_cfg, &s_rx_bs);
-    if (err != ESP_OK) return err;
-    if ((err = bitscrambler_enable(s_rx_bs)) != ESP_OK) return err;
-    if ((err = c5vrx2_wbfm_q4_configure(s_rx_bs)) != ESP_OK) return err;
-    if ((err = bitscrambler_reset(s_rx_bs)) != ESP_OK) return err;
-    if ((err = bitscrambler_start(s_rx_bs)) != ESP_OK) return err;
-    return parlio_rx_unit_enable(s_rx, true);
+    if (trace_step(13u, err) != ESP_OK) return err;
+    err = bitscrambler_enable(s_rx_bs);
+    if (trace_step(14u, err) != ESP_OK) return err;
+    err = c5vrx2_wbfm_q4_configure(s_rx_bs);
+    if (trace_step(15u, err) != ESP_OK) return err;
+    err = bitscrambler_reset(s_rx_bs);
+    if (trace_step(16u, err) != ESP_OK) return err;
+    err = bitscrambler_start(s_rx_bs);
+    if (trace_step(17u, err) != ESP_OK) return err;
+    err = parlio_rx_unit_enable(s_rx, true);
+    return trace_step(18u, err);
 }
 
 static esp_err_t prepare_tx(void)
@@ -147,8 +163,9 @@ static esp_err_t prepare_tx(void)
         .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
     };
     esp_err_t err = parlio_new_tx_unit(&cfg, &s_tx);
-    if (err != ESP_OK) return err;
-    return parlio_tx_unit_enable(s_tx);
+    if (trace_step(20u, err) != ESP_OK) return err;
+    err = parlio_tx_unit_enable(s_tx);
+    return trace_step(21u, err);
 }
 
 static esp_err_t start_rx_ring(void)
@@ -206,7 +223,7 @@ esp_err_t c5vrx2_realtime_start(void)
                           ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     esp_err_t err = route_modem_iq();
-    if (err != ESP_OK) return err;
+    if (trace_step(10u, err) != ESP_OK) return err;
     if ((err = prepare_rx()) != ESP_OK) return err;
     if ((err = prepare_tx()) != ESP_OK) return err;
 
@@ -214,7 +231,8 @@ esp_err_t c5vrx2_realtime_start(void)
      * measurement. Start the AV ring only afterwards, otherwise RX would
      * lap the buffer an unknown number of times before TX gets its phase
      * offset. This ordering does not rearm or interrupt the RF producer. */
-    if ((err = continuous_iq_start()) != ESP_OK) return err;
+    err = continuous_iq_start();
+    if (trace_step(30u, err) != ESP_OK) return err;
     if ((err = start_rx_ring()) != ESP_OK) return err;
 
     /* Put the 20-MS/s TX consumer half a ring behind RX-GDMA. Both PARLIO
