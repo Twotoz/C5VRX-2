@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode a C5VRX-2 staged BitScrambler self-test flash record."""
+"""Decode a C5VRX staged BitScrambler self-test flash record."""
 
 from __future__ import annotations
 

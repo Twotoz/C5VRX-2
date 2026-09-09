@@ -1,4 +1,4 @@
-# C5VRX-2 minimal flasher
+# C5VRX minimal flasher
 
 This intentionally keeps the hardware flow small:
 
@@ -17,7 +17,8 @@ then real-domain 2:1 filtering to the 20-MS/s AV stream. USB never paces it.
 The local page includes `c5vrx2-iq-fm-idf601-40.bin`; click **Use continuous-IQ build**
 instead of browsing for a file.
 
-The `C5VRX-2 realtime build` GitHub Action produces artifact `c5vrx2-full` containing:
+The `C5VRX realtime build` GitHub Action produces the compatibility-named
+artifact `c5vrx2-full` containing:
 
 ```text
 c5vrx2-full.bin

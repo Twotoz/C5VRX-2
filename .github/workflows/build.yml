@@ -1,8 +1,8 @@
-name: C5VRX-2 realtime build
+name: C5VRX realtime build
 
 on:
   push:
-    branches: [realtime-iq-parlio]
+    branches: [main]
   pull_request:
 
 jobs:
