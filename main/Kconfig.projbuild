@@ -28,6 +28,12 @@ choice C5VRX2_MODE
     config C5VRX2_MODE_MODEM_PARLIO
         bool "Capture proven Q4/I4 bus with PARLIO RX"
 
+    config C5VRX2_MODE_MODEM_WBFM
+        bool "Capture PARLIO-attached adjacent-FM output"
+
+    config C5VRX2_MODE_TX_WBFM_TEST
+        bool "Byte-exact PARLIO TX WBFM decorator test"
+
     config C5VRX2_MODE_AV_STATIC
         bool "AV static DAC code"
 
@@ -43,5 +49,33 @@ config C5VRX2_AV_STATIC_CODE
     depends on C5VRX2_MODE_AV_STATIC
     range 0 63
     default 18
+
+config C5VRX2_LIVE_SNAPSHOT_ONCE
+    bool "Persist one live raw Q4/I4 ring for offline diagnosis"
+    depends on C5VRX2_MODE_LIVE
+    default n
+    help
+        Start the live input transport, snapshot the 16384-byte raw Q4/I4
+        ring, then explicitly stop RF/PARLIO and persist it in diagcap. This
+        is a bounded hardware diagnostic only; normal live firmware remains
+        continuous and never writes its realtime ring to flash.
+
+config C5VRX2_LIVE_SNAPSHOT_RAW_Q4
+    bool "Bypass TX WBFM/DAC while taking the raw snapshot"
+    depends on C5VRX2_LIVE_SNAPSHOT_ONCE
+    default n
+    help
+        Bypass the BitScrambler and DAC for the bounded snapshot and persist
+        the exact 40-MS/s MODEM_DIAG Q4/I4 bytes. This isolates input sample
+        integrity from adjacent-FM, rate conversion, gain and clamping.
+
+config C5VRX2_WBFM_SELFTEST_ONCE
+    bool "Run bounded Q4 WBFM BitScrambler loopback self-test"
+    depends on C5VRX2_MODE_LIVE
+    default n
+    help
+        Feed deterministic Q4/I4 bytes to the exact production BitScrambler
+        program through its hardware loopback, compare against the C reference,
+        and persist input/actual/expected data in diagcap. RF is not started.
 
 endmenu

@@ -24,11 +24,13 @@
 #define TX_START_SELECT 0x00060000u
 
 #define READER_GUARD_WORDS 256u
-#if CONFIG_C5VRX2_MODE_MODEM_PARLIO
-/* The PARLIO proof masks interrupts while MAC owns the dump SRAM. Keep its
- * rate measurement plus long capture comfortably below the observed ~5 ms
- * CPU-lockup boundary. Half a millisecond still observes about 40 RF-ring
- * wraps and is ample for a diagnostic cadence estimate. */
+#if CONFIG_C5VRX2_MODE_MODEM_PARLIO || CONFIG_C5VRX2_MODE_MODEM_WBFM || \
+    CONFIG_C5VRX2_MODE_LIVE
+/* The PARLIO paths run while the autonomous dump/diagnostic source is active.
+ * Keep the one-time cadence measurement comfortably below the observed ~5 ms
+ * CPU-lockup boundary. LIVE used to fall through to 4 ms here and could lock
+ * before start_rx_ring() or the USB/snapshot tasks ever ran. Half a
+ * millisecond still observes about 40 RF-ring wraps. */
 #define RATE_MEASURE_US     500u
 #else
 #define RATE_MEASURE_US    4000u
@@ -138,7 +140,7 @@ static bool update_producer(void)
 }
 
 #if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE && !CONFIG_C5VRX2_MODE_MODEM_PARLIO && \
-    !CONFIG_C5VRX2_MODE_LIVE
+    !CONFIG_C5VRX2_MODE_MODEM_WBFM && !CONFIG_C5VRX2_MODE_LIVE
 static void observe_producer(void *argument)
 {
     (void)argument;
@@ -231,6 +233,7 @@ esp_err_t IRAM_ATTR continuous_iq_start(void)
     control = (control & ~0x0001ffffu) | C5VRX2_RF_WORDS;
     REG32(DUMP_CTRL) = control;
     continuous_iq_debug_mark(405u);
+    c5vrx2_trace_stage(105u, ESP_OK);
 
     /* Quiesce LMAC while CPU still owns all HP SRAM.  lmac_stop_hw_txq() is
      * private vendor code and may use internal Wi-Fi state in the bank which
@@ -240,12 +243,17 @@ esp_err_t IRAM_ATTR continuous_iq_start(void)
     err = c5vrx2_wifi5_lock_rx_only();
     if (err != ESP_OK) return err;
     continuous_iq_debug_mark(406u);
+    c5vrx2_trace_stage(106u, ESP_OK);
 
     /* Reproduce the vendor wrapper's SRAM grant once.  The linker/heap
      * reservation keeps all HP stacks and objects outside this 64 KiB bank. */
     s_iq.saved_sram_usage = REG32(HP_SRAM_USAGE);
     continuous_iq_debug_mark(407u);
-#if CONFIG_C5VRX2_MODE_RF_DMA_CPU_OWNED || CONFIG_C5VRX2_MODE_LIVE
+    c5vrx2_trace_stage_detail(107u, ESP_OK, s_iq.saved_sram_usage,
+                              control, selector);
+#if CONFIG_C5VRX2_MODE_RF_DMA_CPU_OWNED || \
+    CONFIG_C5VRX2_MODE_MODEM_PARLIO || \
+    CONFIG_C5VRX2_MODE_MODEM_WBFM || CONFIG_C5VRX2_MODE_LIVE
     /* MODEM_DIAG is LIVE's sample transport. Keep HP CPU ownership so USB,
      * interrupts and normal code remain available; the dump engine is used
      * only to keep the verified RF/diagnostic source configured and armed.
@@ -280,7 +288,7 @@ esp_err_t IRAM_ATTR continuous_iq_start(void)
     }
     continuous_iq_debug_mark(410u);
 #if !CONFIG_C5VRX2_MODE_MODEM_CAPTURE && !CONFIG_C5VRX2_MODE_MODEM_PARLIO && \
-    !CONFIG_C5VRX2_MODE_LIVE
+    !CONFIG_C5VRX2_MODE_MODEM_WBFM && !CONFIG_C5VRX2_MODE_LIVE
     const esp_timer_create_args_t observer_args = {
         .callback = observe_producer,
         .name = "iq_ptr",

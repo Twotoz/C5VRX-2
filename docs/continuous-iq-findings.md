@@ -188,8 +188,9 @@ Routing the proven Q4/I4 lanes into PARLIO RX produced a bit-perfect bounded
 capture of every second native MODEM sample. The RF/dump cadence remained about
 79.99 MS/s while PARLIO RX topped out at about 40 MS/s even when F80 or F160
 was requested. The current LIVE path therefore treats 40 MS/s as its acquired
-complex-IQ rate, runs adjacent FM on every acquired sample, and performs the
-next 2:1 reduction only in the real domain.
+complex-IQ rate. The original adjacent-FM plus real-domain 2:1 program was
+correct but exceeded the BitScrambler instruction-rate budget; the bounded
+two-bundle replacement and its remaining caveat are documented below.
 
 The receive transaction is genuinely cyclic: ESP-IDF 6.0.1 maps
 `partial_rx_en=true` to an infinite transaction and links the final RX-GDMA
@@ -197,3 +198,61 @@ node back to the head. The output transaction independently uses PARLIO's
 hardware `loop_transmission` mode. A short sequence match does not prove that
 80-to-40 sampling remains phase-locked indefinitely, nor that either DMA ring
 boundary is sample-perfect; those remain explicit hardware tests.
+
+## Direct TX-BitScrambler WBFM proof
+
+The RX-attached BitScrambler could not sustain the required input cadence, so
+the realtime topology now stores raw Q4/I4 with PARLIO RX and decorates the
+PARLIO TX transaction instead. A bounded full-duplex hardware test proved that
+the direct TX decorator consumes two input bytes per 20-MHz output byte without
+FIFO underrun while PARLIO RX captures the output concurrently.
+
+The final realtime core contains two instruction bundles. It retains the
+second Q4/I4 byte from each input pair as a compact Q3/I2 state and directly
+addresses a 32-by-32 discriminator/output LUT with the preceding and current
+states. Hardware address oracles established all relevant C5 behavior:
+
+```text
+constant embedded LUT[0]                  4000 / 4000 exact outputs
+current selected byte (input 3,5,7,...)   4000 / 4000 exact addresses
+previous selected byte (input 1,3,5,...)  4000 / 4000 exact addresses
+16-bit LUT address bit 0                   O16
+current IQ5 address bits                   O16..O20
+previous IQ5 address bits                  O21..O25
+```
+
+This rejects the earlier high/reversed `O31..O22` address hypothesis for C5
+16-bit LUT mode. The production 1024-entry embedded table then ran at the full
+requested transport rate and matched the independent CPU reference for 3998
+of 3999 aligned observable low-nibble outputs. The sole mismatch was the
+bounded transaction's trailing pipeline boundary; setup, RX and TX all
+returned `ESP_OK`.
+
+The live DMA topology is consequently:
+
+```text
+MODEM_DIAG Q4/I4
+ -> PARLIO RX 40 MHz
+ -> 4 x 4096-byte raw cyclic ring
+ -> one-block producer/consumer separation
+ -> TX BitScrambler (two bundles, persistent history)
+ -> PARLIO TX 20 MHz
+ -> six-bit resistor DAC
+```
+
+RX writes 40 MB/s and TX-BS consumes the same raw 40 MB/s. Their clocks are
+integer divisions of the same `PLL_F240M` root (`/6` and `/12`), so software
+does not pace or copy the stream. The BitScrambler is started once as part of
+one hardware-looping TX transaction; normal ring wraps do not reset its prior
+IQ state. Normal live telemetry reads only control registers: it does not
+copy, scan, persist or print samples from the DMA ring. USB/debug is therefore
+outside both transport pacing and the hot SRAM data path.
+
+The compact core evaluates circular phase change between consecutive retained
+20-MS/s states, equivalent to an `n -> n+2` interval in the acquired 40-MS/s
+Q4 stream. It is not yet proven that this wider interval never becomes
+ambiguous for the actual VTX deviation. A raw-capture range test and a long AV
+A/B-boundary continuity test remain required. The embedded LUT currently uses
+pedestal 20, current-minus-previous polarity and the default 1.5x
+post-difference gain; runtime calibration changes require regenerating or
+selecting another embedded LUT.

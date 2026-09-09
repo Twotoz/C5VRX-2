@@ -1,15 +1,34 @@
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "wifi5.h"
 #include "calibration.h"
+#include "continuous_iq.h"
 #include "diagnostics.h"
 #include "realtime.h"
+#include "rf_dump.h"
 #include "startup_trace.h"
+#include "wbfm_q4.h"
 
 static const char *TAG = "c5vrx2";
+
+#define XIAO_USER_LED GPIO_NUM_27
+
+static void init_hardware_marker(void)
+{
+    const gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << XIAO_USER_LED,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&cfg) == ESP_OK)
+        gpio_set_level(XIAO_USER_LED, 0); /* active-low: entering startup */
+}
 
 static void report_fatal_forever(const char *stage, esp_err_t err)
 {
@@ -33,6 +52,16 @@ static esp_err_t init_nvs(void)
 
 void app_main(void)
 {
+    init_hardware_marker();
+    /* Do this before the first scheduler delay. A CPU-only reset can leave
+     * the autonomous modem dump domain armed and its SRAM view non-CPU. */
+    c5vrx2_rf_dump_boot_sanitize();
+#if CONFIG_C5VRX2_LIVE_SNAPSHOT_ONCE
+    /* RTC_NOINIT survives an application reset.  Snapshot bring-up can lose
+     * USB as soon as the modem source is enabled, so preserve the previous
+     * run's last fine-grained RF marker before this boot overwrites it. */
+    const uint32_t retained_rf_marker = continuous_iq_debug_last_stage();
+#endif
 #if CONFIG_C5VRX2_MODE_AV_STATIC
     ESP_LOGW(TAG, "C5VRX-2: static resistor-DAC diagnostic boot");
     const esp_err_t err = c5vrx2_av_static_diagnostic_start(
@@ -53,7 +82,16 @@ void app_main(void)
                                 esp_err_to_name(err));
     return;
 #else
-    ESP_LOGW(TAG, "C5VRX-2: continuous adjacent-IQ FM receiver boot");
+    ESP_LOGW(TAG, "C5VRX-2: direct TX-BitScrambler WBFM receiver boot");
+
+    /* Native USB disconnects while the XIAO resets and is enumerated again
+     * only after the application has started. Give the host a short window
+     * to reopen the port before entering private Wi-Fi/PHY initialization;
+     * otherwise an early stall is completely silent on USB. The retained
+     * marker also identifies the last completed startup operation. */
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    ESP_LOGW(TAG, "previous retained startup marker=%u",
+             (unsigned)continuous_iq_debug_last_stage());
 
     esp_err_t err = init_nvs();
     if (err != ESP_OK) {
@@ -66,12 +104,51 @@ void app_main(void)
     c5vrx2_trace_begin();
 #endif
     c5vrx2_trace_stage(2u, ESP_OK);
+#if CONFIG_C5VRX2_LIVE_SNAPSHOT_ONCE
+    c5vrx2_trace_stage_detail(4u, ESP_OK, retained_rf_marker, 0u, 0u);
+    if (retained_rf_marker >= 401u && retained_rf_marker <= 499u) {
+        /* Recovery boot: leave the persisted marker intact and remain alive.
+         * The first post-flash boot has no valid marker and runs normally. */
+        gpio_set_level(XIAO_USER_LED, 1);
+        for (;;) vTaskDelay(portMAX_DELAY);
+    }
+#endif
+
+#if CONFIG_C5VRX2_WBFM_SELFTEST_ONCE
+    /* The persisted record is authoritative for the temporary input/LUT
+     * address oracle. RF and the DAC are not involved. */
+    const unsigned pulses = c5vrx2_wbfm_q4_selftest_once();
+    for (unsigned pulse = 0u; pulse < pulses; ++pulse) {
+        gpio_set_level(XIAO_USER_LED, 1);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        gpio_set_level(XIAO_USER_LED, 0);
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
+    gpio_set_level(XIAO_USER_LED, 1);
+    return;
+#endif
+
+#if CONFIG_C5VRX2_MODE_TX_WBFM_TEST
+    /* This bounded test contains no RF input. Run it before Wi-Fi/PHY setup,
+     * so a private RF-startup failure cannot hide the PARLIO TX decorator
+     * result. The diagnostic persists its byte comparison before returning. */
+    err = c5vrx2_tx_wbfm_diagnostic_run();
+    gpio_set_level(XIAO_USER_LED, err == ESP_OK ? 1 : 0);
+    if (err != ESP_OK) report_fatal_forever("tx_wbfm_test", err);
+    ESP_LOGW(TAG, "TX WBFM hardware test passed and was persisted");
+    return;
+#endif
 
     err = c5vrx2_wifi5_start_a1();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "A1 RF init failed: %s", esp_err_to_name(err));
         report_fatal_forever("wifi5_start_a1", err);
     }
+    /* A visible one-second dark interval proves that Wi-Fi/PHY init returned.
+     * This is deliberately synchronous startup-only instrumentation: it adds
+     * no task, timer or interrupt to the realtime path. */
+    gpio_set_level(XIAO_USER_LED, 1);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     c5vrx2_trace_stage(3u, ESP_OK);
 
 #if CONFIG_C5VRX2_MODE_RF_ORACLE
@@ -84,7 +161,7 @@ void app_main(void)
     err = c5vrx2_modem_diag_diagnostic_run();
 #elif CONFIG_C5VRX2_MODE_MODEM_CAPTURE
     err = c5vrx2_modem_capture_diagnostic_run();
-#elif CONFIG_C5VRX2_MODE_MODEM_PARLIO
+#elif CONFIG_C5VRX2_MODE_MODEM_PARLIO || CONFIG_C5VRX2_MODE_MODEM_WBFM
     err = c5vrx2_modem_parlio_diagnostic_run();
 #else
     err = c5vrx2_realtime_start();
@@ -107,6 +184,7 @@ void app_main(void)
 #endif
         report_fatal_forever("receiver", err);
     }
+    gpio_set_level(XIAO_USER_LED, 0); /* realtime pipeline started */
     ESP_LOGI(TAG, "selected receiver mode completed/started; main task released");
 #endif
 }

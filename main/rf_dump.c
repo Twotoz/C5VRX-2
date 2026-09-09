@@ -16,6 +16,11 @@
 #define SOURCE_MUX     0x600a70b8u
 #define MODEM_CLOCK    0x600a9c04u
 #define CTRL_ENABLE    0x80000000u
+#define CTRL_START     0x00080000u
+#define CTRL_DONE      0x00040000u
+#define CTRL_DUMP_FIRST 0x00020000u
+#define HP_SRAM_USAGE  0x60095004u
+#define HP_DUMP_FIELDS 0x00010f00u
 
 #define PRE_GUARD_ADDR  0x4082ffc0u
 #define POST_GUARD_ADDR 0x40850000u
@@ -29,6 +34,23 @@
  * the second bank and causes an immediate CPU lockup at the ownership write. */
 SOC_RESERVE_MEMORY_REGION(PRE_GUARD_ADDR, POST_GUARD_END, c5vrx2_rf_dump_ram);
 extern char _bss_end;
+
+void IRAM_ATTR c5vrx2_rf_dump_boot_sanitize(void)
+{
+    /* The modem dump block can outlive a CPU-only reset. Leaving ENABLE or
+     * MAC ownership set makes the next esp_wifi_init() touch an HP SRAM view
+     * which is still disconnected from the CPU, ending in a silent lockup.
+     * This is reset recovery only: it is never used at a normal ring wrap. */
+    REG32(DUMP_CTRL) &=
+        ~(CTRL_ENABLE | CTRL_START | CTRL_DONE | CTRL_DUMP_FIRST);
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+
+    /* SRAM_USAGE=0 is the documented CPU HP-memory view. Clear the adjacent
+     * MAC_DUMP_ALLOC selector as well; continuous_iq_start() will establish
+     * the verified live mapping exactly once after Wi-Fi/PHY is healthy. */
+    REG32(HP_SRAM_USAGE) &= ~HP_DUMP_FIELDS;
+    __asm__ __volatile__("fence iorw, iorw" ::: "memory");
+}
 
 static uint32_t guard_value(unsigned index)
 {

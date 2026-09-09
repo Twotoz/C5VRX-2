@@ -22,7 +22,7 @@ HEADER_WORDS = 21
 HEADER_BYTES = 128
 GPIO_PINS = (1, 0, 25, 7, 10, 5, 3, 4)
 EXPECTED_BITS = (6, 7, 8, 9, 16, 17, 18, 19)
-PARLIO_RATES_HZ = {version: 40_000_000.0 for version in (4, 5, 6, 7)}
+PARLIO_RATES_HZ = {version: 40_000_000.0 for version in (4, 5, 6, 7, 8)}
 
 
 def load_capture(path: Path) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
@@ -35,9 +35,9 @@ def load_capture(path: Path) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
         "ring_hash", "capture_end_pointer", "capture_end_ptr_mode", "stop_us",
     )
     header = dict(zip(names, struct.unpack_from("<21I", blob)))
-    if header["magic"] != MAGIC or header["version"] not in (1, 4, 5, 6, 7):
+    if header["magic"] != MAGIC or header["version"] not in (1, 4, 5, 6, 7, 8, 9):
         raise ValueError(
-            "capture is not a complete MODEM_CAPTURE (v1/v4/v5/v6/v7)")
+            "capture is not a complete MODEM_CAPTURE (v1/v4/v5/v6/v7/v8/v9)")
     if header["header_bytes"] != HEADER_BYTES:
         raise ValueError("unsupported capture header size")
     if header["version"] != 1:
@@ -48,14 +48,16 @@ def load_capture(path: Path) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
     raw_offset = header["header_bytes"]
     raw_item_bytes = 4 if header["version"] == 1 else 1
     ring_offset = raw_offset + header["raw_words"] * raw_item_bytes
-    needed = ring_offset + header["ring_words"] * 4
+    needed = ring_offset if header["version"] == 9 else \
+        ring_offset + header["ring_words"] * 4
     if len(blob) < needed:
         raise ValueError("capture file is truncated")
     raw_dtype = "<u4" if header["version"] == 1 else "u1"
     raw = np.frombuffer(blob, dtype=raw_dtype, count=header["raw_words"],
                         offset=raw_offset).copy()
-    ring = np.frombuffer(blob, dtype="<u4", count=header["ring_words"],
-                         offset=ring_offset).copy()
+    ring = (np.empty(0, dtype=np.uint32) if header["version"] == 9 else
+            np.frombuffer(blob, dtype="<u4", count=header["ring_words"],
+                          offset=ring_offset).copy())
     return header, raw, ring
 
 
@@ -166,6 +168,29 @@ def analyze_cvbs(captured: np.ndarray, sample_rate_hz: float) -> None:
     print(f"PAL line correlation:{best_corr: .6f}")
 
 
+def analyze_delta(captured: np.ndarray, sample_rate_hz: float) -> None:
+    """Analyze hardware adjacent-FM bytes from the PARLIO RX attachment."""
+    signed = captured.astype(np.int16)
+    signed = np.where(signed >= 128, signed - 256, signed).astype(float)
+    filtered = np.convolve(signed, np.ones(8) / 8.0, mode="valid")
+    filtered -= np.mean(filtered)
+    best = (-2.0, 0)
+    nominal = sample_rate_hz / 15_734.264
+    for lag in range(int(nominal - 32), int(nominal + 33)):
+        left, right = filtered[:-lag], filtered[lag:]
+        denom = float(np.sqrt(np.dot(left, left) * np.dot(right, right)))
+        corr = float(np.dot(left, right) / denom) if denom else 0.0
+        if corr > best[0]:
+            best = (corr, lag)
+    print("capture transport:   PARLIO RX + BitScrambler adjacent FM")
+    print(f"FM unique bytes:     {np.unique(captured).size}/256")
+    print(f"FM range/std:        {int(signed.min())}..{int(signed.max())} / "
+          f"{np.std(signed):.4f}")
+    print(f"NTSC best period:    {best[1]} samples "
+          f"({sample_rate_hz / best[1]:.3f} Hz)")
+    print(f"NTSC correlation:    {best[0]:.6f}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("capture", type=Path)
@@ -176,6 +201,9 @@ def main() -> None:
 
     header, raw, ring = load_capture(args.capture)
     captured = pack_gpio(raw) if header["version"] == 1 else raw
+    if header["version"] == 9:
+        analyze_delta(captured, 40_000_000.0)
+        return
     samples = args.samples or (900 if header["version"] == 1 else 1800)
     search_width = args.search_width
     if search_width is None:

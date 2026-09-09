@@ -1,17 +1,18 @@
 #include "realtime.h"
 
-#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "driver/bitscrambler.h"
 #include "driver/gpio.h"
+#include "driver/parlio_bitscrambler.h"
 #include "driver/parlio_rx.h"
 #include "driver/parlio_tx.h"
 #include "esp_attr.h"
 #include "esp_cache.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
@@ -26,7 +27,9 @@
 
 #define MODEM_IQ_RATE_HZ 40000000u
 #define CVBS_RATE_HZ     20000000u
-#define CVBS_RING_BYTES      8192u
+#define RAW_BLOCK_BYTES      4096u
+#define RAW_RING_BLOCKS         4u
+#define RAW_RING_BYTES (RAW_BLOCK_BYTES * RAW_RING_BLOCKS)
 
 #define DUMP_CTRL       0x600a9004u
 #define DUMP_PTR_MODE   0x600a9008u
@@ -44,17 +47,43 @@ static const gpio_num_t s_iq_pins[8] = {
 };
 static const uint8_t s_iq_diag[8] = {6u, 7u, 8u, 9u, 16u, 17u, 18u, 19u};
 
-/* RX-GDMA writes the BitScrambler's 20-MS/s real output here while TX-GDMA
- * reads the same ring at the exact same PLL-derived rate. 8192 bytes provide
- * about 410 us of elastic storage without adding a frame buffer. */
-static DMA_ATTR __attribute__((aligned(64))) uint8_t s_cvbs_ring[CVBS_RING_BYTES];
+/* RX-GDMA writes raw Q4/I4 at 40 MB/s. TX-GDMA reads the same bytes at
+ * 40 MB/s and its BitScrambler emits one 6-bit CVBS sample per two input
+ * bytes. Both units derive 40:20 MHz from PLL_F240M. Starting TX one block
+ * behind RX keeps producer and consumer away from the same bytes without a
+ * CPU copy or a second CVBS ring. */
+static DMA_ATTR __attribute__((aligned(64))) uint8_t s_raw_ring[RAW_RING_BYTES];
+#if CONFIG_C5VRX2_LIVE_SNAPSHOT_ONCE
 static DRAM_ATTR __attribute__((aligned(16))) uint8_t
-    s_cvbs_snapshot[CVBS_RING_BYTES];
+    s_raw_snapshot[RAW_RING_BYTES];
+#endif
 
 static parlio_rx_unit_handle_t s_rx;
 static parlio_rx_delimiter_handle_t s_rx_delimiter;
 static parlio_tx_unit_handle_t s_tx;
-static bitscrambler_handle_t s_rx_bs;
+
+#define LIVE_CAPTURE_MAGIC 0x31564243u /* little-endian "CBV1" */
+#define LIVE_CAPTURE_SUBTYPE ((esp_partition_subtype_t)0x42)
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t header_bytes;
+    uint32_t payload_bytes;
+    uint32_t iq_rate_hz;
+    uint32_t cvbs_rate_hz;
+    uint32_t writer_pointer;
+    uint32_t dump_control;
+    uint8_t minimum;
+    uint8_t maximum;
+    uint16_t reserved0;
+    uint32_t sample_sum;
+    uint32_t transitions;
+    uint32_t reserved[6];
+} live_capture_header_t;
+
+_Static_assert(sizeof(live_capture_header_t) == 64u,
+               "live capture header size");
 
 static esp_err_t trace_step(uint32_t stage, esp_err_t err)
 {
@@ -93,7 +122,7 @@ static esp_err_t prepare_rx(void)
 {
     const parlio_rx_unit_config_t cfg = {
         .trans_queue_depth = 1u,
-        .max_recv_size = sizeof(s_cvbs_ring),
+        .max_recv_size = sizeof(s_raw_ring),
         .dma_burst_size = 32u,
         .data_width = 8u,
         .clk_src = PARLIO_CLK_SRC_DEFAULT,
@@ -122,27 +151,16 @@ static esp_err_t prepare_rx(void)
          * infinite (partial_rx_en) transaction. In infinite mode this only
          * marks recurring receive boundaries; the cyclic GDMA link keeps
          * running and is not rearmed by software. */
-        .eof_data_len = sizeof(s_cvbs_ring),
+        .eof_data_len = sizeof(s_raw_ring),
         .timeout_ticks = 0u,
     };
     err = parlio_new_rx_soft_delimiter(&delimiter_cfg, &s_rx_delimiter);
     if (trace_step(12u, err) != ESP_OK) return err;
 
-    const bitscrambler_config_t bs_cfg = {
-        .dir = BITSCRAMBLER_DIR_RX,
-        .attach_to = SOC_BITSCRAMBLER_ATTACH_PARL_IO,
-    };
-    err = bitscrambler_new(&bs_cfg, &s_rx_bs);
-    if (trace_step(13u, err) != ESP_OK) return err;
-    err = bitscrambler_enable(s_rx_bs);
-    if (trace_step(14u, err) != ESP_OK) return err;
-    err = c5vrx2_wbfm_q4_configure(s_rx_bs);
-    if (trace_step(15u, err) != ESP_OK) return err;
-    err = bitscrambler_reset(s_rx_bs);
-    if (trace_step(16u, err) != ESP_OK) return err;
-    err = bitscrambler_start(s_rx_bs);
-    if (trace_step(17u, err) != ESP_OK) return err;
-    err = parlio_rx_unit_enable(s_rx, true);
+    /* The receive side always stores raw Q4/I4. WBFM runs only on the TX
+     * BitScrambler, which avoids the physically measured RX-BS throughput
+     * limit and keeps the captured source available for diagnostics. */
+    err = parlio_rx_unit_enable(s_rx, false);
     return trace_step(18u, err);
 }
 
@@ -160,15 +178,17 @@ static esp_err_t prepare_tx(void)
         .valid_start_delay = 0,
         .valid_stop_delay = 0,
         .trans_queue_depth = 1u,
-        .max_transfer_size = sizeof(s_cvbs_ring),
+        .max_transfer_size = sizeof(s_raw_ring),
         .dma_burst_size = 32u,
         .shift_edge = PARLIO_SHIFT_EDGE_NEG,
         .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
     };
     esp_err_t err = parlio_new_tx_unit(&cfg, &s_tx);
     if (trace_step(20u, err) != ESP_OK) return err;
+    err = parlio_tx_unit_decorate_bitscrambler(s_tx);
+    if (trace_step(21u, err) != ESP_OK) return err;
     err = parlio_tx_unit_enable(s_tx);
-    return trace_step(21u, err);
+    return trace_step(22u, err);
 }
 
 static esp_err_t start_rx_ring(void)
@@ -183,7 +203,7 @@ static esp_err_t start_rx_ring(void)
             .indirect_mount = false,
         },
     };
-    return parlio_rx_unit_receive(s_rx, s_cvbs_ring, sizeof(s_cvbs_ring),
+    return parlio_rx_unit_receive(s_rx, s_raw_ring, sizeof(s_raw_ring),
                                   &cfg);
 }
 
@@ -192,36 +212,11 @@ static esp_err_t start_tx_ring(void)
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
     const parlio_transmit_config_t cfg = {
         .idle_value = cal->pedestal_code,
-        .bitscrambler_program = NULL,
+        .bitscrambler_program = c5vrx2_wbfm_q4_iq5_program(),
         .flags.loop_transmission = true,
     };
-    return parlio_tx_unit_transmit(s_tx, s_cvbs_ring,
-                                   sizeof(s_cvbs_ring) * 8u, &cfg);
-}
-
-static int snapshot_correlation_permille(size_t lag)
-{
-    int64_t sum_a = 0;
-    int64_t sum_b = 0;
-    int64_t sum_aa = 0;
-    int64_t sum_bb = 0;
-    int64_t sum_ab = 0;
-    const int64_t count = (int64_t)(sizeof(s_cvbs_snapshot) - lag);
-    for (size_t i = 0u; i + lag < sizeof(s_cvbs_snapshot); ++i) {
-        const int a = s_cvbs_snapshot[i];
-        const int b = s_cvbs_snapshot[i + lag];
-        sum_a += a;
-        sum_b += b;
-        sum_aa += (int64_t)a * a;
-        sum_bb += (int64_t)b * b;
-        sum_ab += (int64_t)a * b;
-    }
-    const int64_t covariance = count * sum_ab - sum_a * sum_b;
-    const int64_t variance_a = count * sum_aa - sum_a * sum_a;
-    const int64_t variance_b = count * sum_bb - sum_b * sum_b;
-    if (variance_a <= 0 || variance_b <= 0) return 0;
-    return (int)lrint(1000.0 * (double)covariance /
-                      sqrt((double)variance_a * (double)variance_b));
+    return parlio_tx_unit_transmit(s_tx, s_raw_ring,
+                                   sizeof(s_raw_ring) * 8u, &cfg);
 }
 
 static void telemetry_task(void *argument)
@@ -236,75 +231,149 @@ static void telemetry_task(void *argument)
         if (current == previous) stalls++;
         previous = current;
 
-        /* Copy in one optimized burst before analysis. A direct multi-pass
-         * scan takes longer than the 410-us ring period and would correlate
-         * samples from different laps. This snapshot does not stop, sync or
-         * rearm either DMA; at most one short writer seam can cross it. */
-        memcpy(s_cvbs_snapshot, s_cvbs_ring, sizeof(s_cvbs_snapshot));
-        uint32_t sum = 0u;
-        uint32_t transitions = 0u;
-        uint32_t non_pedestal = 0u;
-        uint8_t minimum = UINT8_MAX;
-        uint8_t maximum = 0u;
-        uint8_t last = s_cvbs_snapshot[0];
-        for (size_t i = 0u; i < sizeof(s_cvbs_snapshot); ++i) {
-            const uint8_t sample = s_cvbs_snapshot[i];
-            if (sample < minimum) minimum = sample;
-            if (sample > maximum) maximum = sample;
-            sum += sample;
-            non_pedestal += sample != c5vrx2_calibration_get()->pedestal_code;
-            transitions += i != 0u && sample != last;
-            last = sample;
-        }
+        /* Read-only control-plane telemetry. Normal live deliberately never
+         * scans or copies the DMA ring: USB/logging cannot contend for its
+         * SRAM bandwidth or become part of realtime pacing. */
         ESP_LOGI(TAG,
-                 "LIVE iq_in=40M cvbs_out=20M ptr=%u enable=%u done=%u "
-                 "stalls=%u starts=1 rearms=0 cvbs_min=%u cvbs_max=%u "
-                 "cvbs_avg=%u cvbs_nonped=%u cvbs_changes=%u "
-                 "corr_ntsc=%d corr_pal=%d",
+                 "LIVE raw_in=40M tx_bs_out=20M ptr=%u enable=%u done=%u "
+                 "stalls=%u starts=1 rearms=0",
                  (unsigned)current, (control & CTRL_ENABLE) != 0u,
-                 (control & CTRL_DONE) != 0u, (unsigned)stalls,
-                 minimum, maximum, (unsigned)(sum / sizeof(s_cvbs_ring)),
-                 (unsigned)non_pedestal, (unsigned)transitions,
-                 snapshot_correlation_permille(1271u),
-                 snapshot_correlation_permille(1280u));
+                 (control & CTRL_DONE) != 0u, (unsigned)stalls);
     }
 }
+
+#if CONFIG_C5VRX2_LIVE_SNAPSHOT_ONCE
+static void live_snapshot_task(void *argument)
+{
+    (void)argument;
+    /* Allow the ring to make many laps after all transports have started. */
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(20));
+    memcpy(s_raw_snapshot, s_raw_ring, sizeof(s_raw_snapshot));
+
+    uint32_t sum = 0u;
+    uint32_t transitions = 0u;
+    uint8_t minimum = UINT8_MAX;
+    uint8_t maximum = 0u;
+    for (size_t i = 0u; i < sizeof(s_raw_snapshot); ++i) {
+        const uint8_t sample = s_raw_snapshot[i];
+        if (sample < minimum) minimum = sample;
+        if (sample > maximum) maximum = sample;
+        sum += sample;
+        transitions += i != 0u && sample != s_raw_snapshot[i - 1u];
+    }
+
+    const uint32_t writer = reg32(DUMP_PTR_MODE) & PTR_MASK;
+    const uint32_t control = reg32(DUMP_CTRL);
+    if (s_tx) (void)parlio_tx_unit_disable(s_tx);
+    (void)parlio_rx_soft_delimiter_start_stop(s_rx, s_rx_delimiter, false);
+    (void)parlio_rx_unit_disable(s_rx);
+    if (continuous_iq_is_running()) (void)continuous_iq_stop();
+
+    const live_capture_header_t header = {
+        .magic = LIVE_CAPTURE_MAGIC,
+        .version = 3u,
+        .header_bytes = sizeof(live_capture_header_t),
+        .payload_bytes = sizeof(s_raw_snapshot),
+        .iq_rate_hz = MODEM_IQ_RATE_HZ,
+        .cvbs_rate_hz = CONFIG_C5VRX2_LIVE_SNAPSHOT_RAW_Q4 ? 0u :
+                        CVBS_RATE_HZ,
+        .writer_pointer = writer,
+        .dump_control = control,
+        .minimum = minimum,
+        .maximum = maximum,
+        .sample_sum = sum,
+        .transitions = transitions,
+    };
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, LIVE_CAPTURE_SUBTYPE, "diagcap");
+    esp_err_t result = partition ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (result == ESP_OK)
+        result = esp_partition_erase_range(partition, 0u,
+                                           partition->erase_size * 3u);
+    if (result == ESP_OK)
+        result = esp_partition_write(partition, 0u, &header, sizeof(header));
+    if (result == ESP_OK)
+        result = esp_partition_write(partition, sizeof(header),
+                                     s_raw_snapshot,
+                                     sizeof(s_raw_snapshot));
+
+    /* Six quick flashes means the snapshot is safely on flash. A slow solid
+     * LED means startup, and production-live remains solid after start. */
+    if (result == ESP_OK) {
+        for (unsigned pulse = 0u; pulse < 6u; ++pulse) {
+            gpio_set_level(GPIO_NUM_27, 1);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            gpio_set_level(GPIO_NUM_27, 0);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    gpio_set_level(GPIO_NUM_27, 1);
+    for (;;) vTaskDelay(portMAX_DELAY);
+}
+#endif
 
 esp_err_t c5vrx2_realtime_start(void)
 {
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
-    memset(s_cvbs_ring, cal->pedestal_code, sizeof(s_cvbs_ring));
-    (void)esp_cache_msync(s_cvbs_ring, sizeof(s_cvbs_ring),
+    memset(s_raw_ring, 0, sizeof(s_raw_ring));
+    (void)esp_cache_msync(s_raw_ring, sizeof(s_raw_ring),
                           ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     esp_err_t err = route_modem_iq();
     if (trace_step(10u, err) != ESP_OK) return err;
     if ((err = prepare_rx()) != ESP_OK) return err;
+#if !CONFIG_C5VRX2_LIVE_SNAPSHOT_RAW_Q4
     if ((err = prepare_tx()) != ESP_OK) return err;
+#endif
 
-    /* continuous_iq_start() performs the one-time RF setup and a 4-ms rate
-     * measurement. Start the AV ring only afterwards, otherwise RX would
-     * lap the buffer an unknown number of times before TX gets its phase
-     * offset. This ordering does not rearm or interrupt the RF producer. */
+    /* Snapshot bring-up first proves whether the live MODEM_DIAG bus is
+     * independent of the autonomous SRAM dump writer. Wi-Fi/PHY has already
+     * initialized and tuned the RX chain. Avoiding DUMP_ENABLE here keeps the
+     * CPU, USB and flash available and isolates the DIAG->PARLIO path. */
+#if CONFIG_C5VRX2_LIVE_SNAPSHOT_ONCE
+    if ((err = start_rx_ring()) != ESP_OK) return err;
+#else
+    /* continuous_iq_start() arms the autonomous pre-trigger source once.
+     * Start the AV ring immediately afterwards; normal live never rearms. */
     err = continuous_iq_start();
     if (trace_step(30u, err) != ESP_OK) return err;
     if ((err = start_rx_ring()) != ESP_OK) return err;
+#endif
 
-    /* Put the 20-MS/s TX consumer half a ring behind RX-GDMA. Both PARLIO
-     * dividers share the same PLL source, so the distance remains fixed. */
-    esp_rom_delay_us((CVBS_RING_BYTES / 2u) * 1000000u / CVBS_RATE_HZ);
+    /* RX and the TX-BS consume raw bytes at the same 40 MB/s. Start TX one
+     * complete 4096-byte block behind RX. Their 40:20 clocks share PLL_F240M,
+     * so that separation cannot drift in normal operation. */
+    #if !CONFIG_C5VRX2_LIVE_SNAPSHOT_RAW_Q4
+    esp_rom_delay_us(RAW_BLOCK_BYTES * 1000000u / MODEM_IQ_RATE_HZ);
     if ((err = start_tx_ring()) != ESP_OK) return err;
+    #endif
 
+#if !CONFIG_C5VRX2_LIVE_SNAPSHOT_RAW_Q4
     BaseType_t created = xTaskCreate(telemetry_task, "iq_av_stat", 4096,
                                      NULL, 1u, NULL);
     if (created != pdPASS) return ESP_ERR_NO_MEM;
+#else
+    BaseType_t created;
+#endif
+#if CONFIG_C5VRX2_LIVE_SNAPSHOT_ONCE
+    created = xTaskCreate(live_snapshot_task, "raw_snap", 4096,
+                          NULL, 2u, NULL);
+    if (created != pdPASS) return ESP_ERR_NO_MEM;
+#endif
 
+#if CONFIG_C5VRX2_LIVE_SNAPSHOT_RAW_Q4
     ESP_LOGW(TAG,
-             "LIVE ACTIVE: MODEM 80M -> coherent /2 Q4/I4 40M -> adjacent "
-             "FM -> real LPF /2 -> CVBS 20M -> 6-bit DAC; measured_rf=%u "
+             "RAW SNAPSHOT ACTIVE: MODEM_DIAG Q4/I4 -> PARLIO RX 40M -> "
+             "GDMA/flash; WBFM and DAC bypassed");
+#else
+    ESP_LOGW(TAG,
+             "LIVE ACTIVE: MODEM 80M -> coherent /2 Q4/I4 40M -> direct "
+             "two-sample WBFM LUT -> CVBS 20M -> 6-bit DAC; measured_rf=%u "
              "pedestal=%u gain=%u polarity=%u",
              (unsigned)continuous_iq_sample_rate_hz(),
              cal->pedestal_code, cal->discriminator_gain,
              (unsigned)cal->polarity);
+#endif
     return ESP_OK;
 }

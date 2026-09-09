@@ -15,17 +15,27 @@
 # O8..O15 retains pedestal-phase[n-1] across every normal GDMA ring wrap.
 
 cfg prefetch true
-cfg eof_on downstream
-cfg trailing_bytes 0
+cfg eof_on upstream
+# Prefetch holds eight input bytes ahead of execution. C5 PARLIO can derive
+# TX EOF from the input DMA stream; flush that pipeline for bounded tests.
+# This setting is irrelevant to the eventual infinite cyclic transaction.
+cfg trailing_bytes 9
 cfg lut_width_bits 16
 
 address1:
-    # LUT address bits are output bits 31..22 from this cycle. Preserve the
+    # The C5 16-bit-LUT address is O16..O25 (index bits 0..9). Preserve the
     # previous biased-negative phase in O8..O15 while prefetching sample 2.
     # Reset A here once per pair, avoiding a ninth C5 instruction.
     set 8..15 O8..O15,
-    set 22..29 56..63,
-    set 30..31 L,
+    set 16 0,
+    set 17 1,
+    set 18 2,
+    set 19 3,
+    set 20 4,
+    set 21 5,
+    set 22 6,
+    set 23 7,
+    set 24..25 L,
     read 8,
     LDCTDAL 0
 
@@ -44,8 +54,15 @@ address2:
     # Sample 1 is now the previous sample. Address sample 2 and prefetch the
     # first byte of the next pair.
     set 8..15 O0..O7,
-    set 22..29 56..63,
-    set 30..31 L,
+    set 16 0,
+    set 17 1,
+    set 18 2,
+    set 19 3,
+    set 20 4,
+    set 21 5,
+    set 22 6,
+    set 23 7,
+    set 24..25 L,
     read 8
 
 add_current2:
@@ -63,9 +80,16 @@ map_cvbs:
     # Select LUT bank 1 (indices 0x100..0x1ff) with the low accumulator byte.
     # Preserve sample 2 as the previous phase for the next pair.
     set 8..15 O0..O7,
-    set 22..29 A0..A7,
-    set 30 H,
-    set 31 L
+    set 16 A0,
+    set 17 A1,
+    set 18 A2,
+    set 19 A3,
+    set 20 A4,
+    set 21 A5,
+    set 22 A6,
+    set 23 A7,
+    set 24 H,
+    set 25 L
 
 emit:
     # The LUT has already applied /2, pedestal and saturation. Retain sample

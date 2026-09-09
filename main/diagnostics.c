@@ -7,8 +7,13 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/bitscrambler.h"
+#include "driver/bitscrambler_loopback.h"
+#include "driver/parlio_bitscrambler.h"
 #include "driver/parlio_rx.h"
 #include "driver/parlio_tx.h"
+#include "parlio_priv.h"
+#undef TAG
 #include "esp_async_memcpy.h"
 #include "esp_attr.h"
 #include "esp_cpu.h"
@@ -29,9 +34,11 @@
 #include "freertos/task.h"
 
 #include "continuous_iq.h"
+#include "calibration.h"
 #include "rf_dump.h"
 #include "startup_trace.h"
 #include "wifi5.h"
+#include "wbfm_q4.h"
 
 #define REG32(a) (*(volatile uint32_t *)(uintptr_t)(a))
 #define DUMP_CTRL     0x600a9004u
@@ -59,12 +66,17 @@
 #define MODEM_DIAG_CONFIGS               4u
 #define MODEM_CAPTURE_WORDS            4096u
 #define MODEM_CAPTURE_LANES                8u
-#define MODEM_PARLIO_BYTES            49152u
-#define MODEM_PARLIO_SAMPLE_RATE_HZ   80000000u
-#define MODEM_PARLIO_CAPTURE_US         1400u
+#define MODEM_PARLIO_BYTES             8192u
+#define MODEM_PARLIO_SAMPLE_RATE_HZ   40000000u
+#define MODEM_PARLIO_CAPTURE_US          350u
 #define MODEM_PARLIO_CLOCK_GPIO       GPIO_NUM_2
 #define MODEM_CAPTURE_MAGIC       0x5043444du
 #define MODEM_CAPTURE_SUBTYPE ((esp_partition_subtype_t)0x42)
+#if CONFIG_C5VRX2_MODE_MODEM_WBFM
+#define MODEM_PARLIO_WBFM_ENABLED 1u
+#else
+#define MODEM_PARLIO_WBFM_ENABLED 0u
+#endif
 
 #define PAL_RATE_HZ          20000000u
 #define PAL_HALF_SAMPLES     640u
@@ -114,6 +126,55 @@ static const uint8_t s_modem_capture_signals[MODEM_CAPTURE_LANES] = {
 static DRAM_ATTR uint32_t s_modem_capture[MODEM_CAPTURE_WORDS];
 static DRAM_ATTR uint8_t s_modem_parlio_capture[MODEM_PARLIO_BYTES]
     __attribute__((aligned(64)));
+
+#define TX_WBFM_INPUT_BYTES  8192u
+#define TX_WBFM_OUTPUT_BYTES 4000u
+#define TX_WBFM_PACKED_BYTES (TX_WBFM_OUTPUT_BYTES / 2u)
+#define TX_WBFM_MAGIC        0x31584254u /* little-endian "TBX1" */
+#define TX_WBFM_VALID_GPIO   GPIO_NUM_23
+#define TX_WBFM_TEST_VARIANT 4 /* 1=rate, 2=4-bundle, 3=3-bundle, 4=IQ5/2 */
+#define TX_WBFM_CONSTANT_LUT_ORACLE 0
+BITSCRAMBLER_PROGRAM(c5vrx2_tx_2to1_probe_program,
+                    "c5vrx2_tx_2to1_probe");
+static DMA_ATTR __attribute__((aligned(64))) uint8_t
+    s_tx_wbfm_input[TX_WBFM_INPUT_BYTES];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t
+    s_tx_wbfm_actual[TX_WBFM_OUTPUT_BYTES];
+static DMA_ATTR __attribute__((aligned(64))) uint8_t
+    s_tx_wbfm_packed[TX_WBFM_PACKED_BYTES];
+static DRAM_ATTR uint8_t s_tx_wbfm_expected[TX_WBFM_OUTPUT_BYTES];
+
+static uint32_t fnv1a_hash(const void *data, size_t bytes);
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t header_bytes;
+    uint32_t input_bytes;
+    uint32_t output_bytes;
+    int32_t setup_error;
+    int32_t rx_error;
+    int32_t tx_error;
+    uint32_t elapsed_cycles;
+    uint32_t cpu_hz;
+    uint32_t parlio_int_raw;
+    uint32_t parlio_tx_status;
+    uint32_t parlio_rx_status;
+    uint32_t best_offset;
+    uint32_t compared;
+    uint32_t mismatches;
+    uint32_t first_mismatch;
+    uint32_t actual_hash;
+    uint32_t expected_hash;
+    uint32_t loop_error;
+    uint32_t loop_written;
+    uint32_t loop_mismatches;
+    uint32_t loop_first_mismatch;
+    uint32_t reserved[9];
+} tx_wbfm_header_t;
+
+_Static_assert(sizeof(tx_wbfm_header_t) == 128u,
+               "TX WBFM diagnostic header size");
 
 /* Granting the live dump bank to the modem makes flash-backed interrupt
  * handlers unsafe on this C5 revision. The capture proof keeps that window
@@ -359,6 +420,332 @@ esp_err_t c5vrx2_av_pal_diagnostic_start(bool colour)
     ESP_LOGW(TAG, "AV synthetic PAL %s: 20 MHz, continuous double-buffer DMA",
              colour ? "colour bars + burst" : "monochrome bars");
     return ESP_OK;
+}
+
+esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
+{
+    for (size_t i = 0u; i < sizeof(s_tx_wbfm_input); ++i) {
+        s_tx_wbfm_input[i] =
+            (uint8_t)(i * 73u + (i >> 3u) * 29u + (i >> 7u) * 11u + 17u);
+    }
+    size_t expected_bytes = sizeof(s_tx_wbfm_expected);
+#if TX_WBFM_TEST_VARIANT == 1
+    for (size_t i = 0u; i < expected_bytes; ++i)
+        s_tx_wbfm_expected[i] = s_tx_wbfm_input[i * 2u + 1u];
+#elif TX_WBFM_TEST_VARIANT == 2
+    expected_bytes = c5vrx2_wbfm_q4_fast_reference(
+        s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
+        sizeof(s_tx_wbfm_expected));
+#elif TX_WBFM_TEST_VARIANT == 3
+    expected_bytes = c5vrx2_wbfm_q4_lut3_reference(
+        s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
+        sizeof(s_tx_wbfm_expected));
+#elif TX_WBFM_TEST_VARIANT == 4
+#if TX_WBFM_CONSTANT_LUT_ORACLE
+    memset(s_tx_wbfm_expected, 21, expected_bytes);
+#else
+    expected_bytes = c5vrx2_wbfm_q4_iq5_reference(
+        s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
+        sizeof(s_tx_wbfm_expected));
+#endif
+#else
+    expected_bytes = c5vrx2_wbfm_q4_reference(
+        s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
+        sizeof(s_tx_wbfm_expected));
+#endif
+    esp_err_t loop_error = ESP_ERR_NOT_SUPPORTED;
+    size_t loop_written = 0u;
+    uint32_t loop_mismatches = UINT32_MAX;
+    uint32_t loop_first_mismatch = UINT32_MAX;
+#if TX_WBFM_TEST_VARIANT == 3 || (TX_WBFM_TEST_VARIANT == 4 && !TX_WBFM_CONSTANT_LUT_ORACLE)
+    bitscrambler_handle_t loop_bs = NULL;
+    loop_error = bitscrambler_loopback_create(
+        &loop_bs, SOC_BITSCRAMBLER_ATTACH_I2S0, TX_WBFM_INPUT_BYTES);
+    if (loop_error == ESP_OK)
+        loop_error = TX_WBFM_TEST_VARIANT == 3 ?
+                     c5vrx2_wbfm_q4_configure_lut3(loop_bs) :
+                     c5vrx2_wbfm_q4_configure_iq5(loop_bs);
+    if (loop_error == ESP_OK)
+        loop_error = bitscrambler_loopback_run(
+            loop_bs, s_tx_wbfm_input, sizeof(s_tx_wbfm_input),
+            s_tx_wbfm_actual, expected_bytes, &loop_written);
+    if (loop_error == ESP_OK) {
+        loop_mismatches = 0u;
+        for (size_t i = 0u; i < expected_bytes; ++i) {
+            if (s_tx_wbfm_actual[i] != s_tx_wbfm_expected[i]) {
+                if (loop_first_mismatch == UINT32_MAX)
+                    loop_first_mismatch = (uint32_t)i;
+                loop_mismatches++;
+            }
+        }
+    }
+    if (loop_bs) bitscrambler_free(loop_bs);
+#endif
+    /* A level delimiter consumes one of PARLIO RX's eight physical input
+     * lanes, so a full-width 8-bit receive cannot also use VALID.  This
+     * bounded test captures output bits 0..3 and compares every output clock;
+     * the production TX remains eight-bit and drives all six DAC bits. */
+    for (size_t i = 0u; i < expected_bytes; ++i)
+        s_tx_wbfm_expected[i] &= 0x0fu;
+    memset(s_tx_wbfm_actual, 0xa5, sizeof(s_tx_wbfm_actual));
+    memset(s_tx_wbfm_packed, 0xa5, sizeof(s_tx_wbfm_packed));
+
+    parlio_tx_unit_handle_t tx = NULL;
+    parlio_rx_unit_handle_t rx = NULL;
+    parlio_rx_delimiter_handle_t delimiter = NULL;
+    bool decorated = false;
+    bool tx_enabled = false;
+    bool rx_enabled = false;
+    esp_err_t setup_err = ESP_OK;
+    esp_err_t rx_err = ESP_ERR_INVALID_STATE;
+    esp_err_t tx_err = ESP_ERR_INVALID_STATE;
+    uint32_t elapsed_cycles = 0u;
+    uint32_t lut_pre_actual_hash = 0u;
+    uint32_t lut_pre_expected_hash = 0u;
+    uint32_t lut_pre_mismatches = UINT32_MAX;
+    uint32_t lut_post_actual_hash = 0u;
+    uint32_t lut_post_expected_hash = 0u;
+    uint32_t lut_post_mismatches = UINT32_MAX;
+
+    const parlio_tx_unit_config_t tx_cfg = {
+        .clk_src = PARLIO_CLK_SRC_DEFAULT,
+        .clk_in_gpio_num = -1,
+        .input_clk_src_freq_hz = 0u,
+        .output_clk_freq_hz = 20000000u,
+        .data_width = 8u,
+        .data_gpio_nums = {
+            GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,
+            GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,
+        },
+        .clk_out_gpio_num = MODEM_PARLIO_CLOCK_GPIO,
+        .valid_gpio_num = TX_WBFM_VALID_GPIO,
+        .valid_start_delay = 0,
+        .valid_stop_delay = 0,
+        .trans_queue_depth = 1u,
+        .max_transfer_size = TX_WBFM_INPUT_BYTES,
+        .dma_burst_size = 32u,
+        .shift_edge = PARLIO_SHIFT_EDGE_NEG,
+        .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
+    };
+    setup_err = parlio_new_tx_unit(&tx_cfg, &tx);
+    if (setup_err != ESP_OK) goto persist;
+    setup_err = parlio_tx_unit_decorate_bitscrambler(tx);
+    if (setup_err != ESP_OK) goto cleanup;
+    decorated = true;
+    /* Use the decorator's claimed TX handle and the public loader.  This
+     * guarantees that the LUT is written while the correct channel clock and
+     * memory domain are owned; the transaction's subsequent program load has
+     * no embedded LUT words and therefore preserves these entries. */
+    setup_err = TX_WBFM_TEST_VARIANT == 3 ?
+                c5vrx2_wbfm_q4_configure_lut3(tx->bs_handle) :
+                (TX_WBFM_TEST_VARIANT == 4 ?
+                 c5vrx2_wbfm_q4_configure_iq5(tx->bs_handle) :
+                 c5vrx2_wbfm_q4_load_tx_lut());
+    if (setup_err != ESP_OK) goto cleanup;
+    if (TX_WBFM_TEST_VARIANT == 4)
+        lut_pre_mismatches = c5vrx2_wbfm_q4_verify_tx_iq5_lut(
+            &lut_pre_actual_hash, &lut_pre_expected_hash);
+#if TX_WBFM_TEST_VARIANT == 4 && TX_WBFM_CONSTANT_LUT_ORACLE
+    /* Configure the program first, then overwrite the complete physical LUT.
+     * configure_iq5() itself loads the production IQ table, so doing this in
+     * the opposite order silently invalidates the constant-LUT oracle. */
+    uint16_t *constant_lut = heap_caps_malloc(8192u, MALLOC_CAP_INTERNAL);
+    if (!constant_lut) {
+        setup_err = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+    for (size_t i = 0u; i < 8192u / sizeof(uint16_t); ++i)
+        constant_lut[i] = 21u;
+    setup_err = bitscrambler_load_lut(tx->bs_handle, constant_lut, 8192u);
+    free(constant_lut);
+    if (setup_err != ESP_OK) goto cleanup;
+#endif
+
+    const parlio_rx_unit_config_t rx_cfg = {
+        .trans_queue_depth = 1u,
+        .max_recv_size = TX_WBFM_PACKED_BYTES,
+        .dma_burst_size = 32u,
+        .data_width = 4u,
+        .clk_src = PARLIO_CLK_SRC_DEFAULT,
+        .ext_clk_freq_hz = 20000000u,
+        .exp_clk_freq_hz = 20000000u,
+        .clk_in_gpio_num = MODEM_PARLIO_CLOCK_GPIO,
+        .clk_out_gpio_num = -1,
+        .valid_gpio_num = TX_WBFM_VALID_GPIO,
+        .data_gpio_nums = {
+            GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,
+            -1, -1, -1, -1,
+        },
+        .flags = {
+            .free_clk = false,
+            .clk_gate_en = false,
+            .allow_pd = false,
+        },
+    };
+    setup_err = parlio_new_rx_unit(&rx_cfg, &rx);
+    if (setup_err != ESP_OK) goto cleanup;
+    const parlio_rx_level_delimiter_config_t delimiter_cfg = {
+        .valid_sig_line_id = PARLIO_RX_UNIT_MAX_DATA_WIDTH - 1,
+        .sample_edge = PARLIO_SAMPLE_EDGE_POS,
+        .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
+        .eof_data_len = TX_WBFM_PACKED_BYTES,
+        .timeout_ticks = 0u,
+        .flags.active_low_en = false,
+    };
+    setup_err = parlio_new_rx_level_delimiter(&delimiter_cfg, &delimiter);
+    if (setup_err != ESP_OK) goto cleanup;
+    setup_err = parlio_rx_unit_enable(rx, true);
+    if (setup_err != ESP_OK) goto cleanup;
+    rx_enabled = true;
+    setup_err = parlio_tx_unit_enable(tx);
+    if (setup_err != ESP_OK) goto cleanup;
+    tx_enabled = true;
+
+    const parlio_receive_config_t receive_cfg = {
+        .delimiter = delimiter,
+        .flags = {
+            .partial_rx_en = false,
+            .indirect_mount = false,
+        },
+    };
+    setup_err = parlio_rx_unit_receive(rx, s_tx_wbfm_packed,
+                                       sizeof(s_tx_wbfm_packed),
+                                       &receive_cfg);
+    if (setup_err != ESP_OK) goto cleanup;
+    const parlio_transmit_config_t transmit_cfg = {
+        .idle_value = c5vrx2_calibration_get()->pedestal_code,
+        .bitscrambler_program =
+#if TX_WBFM_TEST_VARIANT == 1
+            c5vrx2_tx_2to1_probe_program,
+#elif TX_WBFM_TEST_VARIANT == 2
+            c5vrx2_wbfm_q4_fast_program(),
+#elif TX_WBFM_TEST_VARIANT == 3
+            c5vrx2_wbfm_q4_lut3_program(),
+#elif TX_WBFM_TEST_VARIANT == 4
+            c5vrx2_wbfm_q4_iq5_program(),
+#else
+            c5vrx2_wbfm_q4_program(),
+#endif
+        .flags.loop_transmission = false,
+    };
+    /* The shared VALID line starts RX on the first real output word.  Do not
+     * force rx_sw_en: doing so captures the queue/start latency as zero-valued
+     * samples and can finish before the transformed payload is observable. */
+    const uint32_t begin = esp_cpu_get_cycle_count();
+    setup_err = parlio_tx_unit_transmit(tx, s_tx_wbfm_input,
+                                        sizeof(s_tx_wbfm_input) * 8u,
+                                        &transmit_cfg);
+    if (setup_err == ESP_OK) rx_err = parlio_rx_unit_wait_all_done(rx, 1000);
+    if (setup_err == ESP_OK) tx_err = parlio_tx_unit_wait_all_done(tx, 1000);
+    elapsed_cycles = esp_cpu_get_cycle_count() - begin;
+    if (TX_WBFM_TEST_VARIANT == 4)
+        lut_post_mismatches = c5vrx2_wbfm_q4_verify_tx_iq5_lut(
+            &lut_post_actual_hash, &lut_post_expected_hash);
+
+    if (rx_err == ESP_OK) {
+        for (size_t i = 0u; i < sizeof(s_tx_wbfm_packed); ++i) {
+            s_tx_wbfm_actual[i * 2u] = s_tx_wbfm_packed[i] & 0x0fu;
+            s_tx_wbfm_actual[i * 2u + 1u] = s_tx_wbfm_packed[i] >> 4u;
+        }
+    }
+
+cleanup:
+    if (tx_enabled) (void)parlio_tx_unit_disable(tx);
+    if (rx_enabled) (void)parlio_rx_unit_disable(rx);
+    if (delimiter) (void)parlio_del_rx_delimiter(delimiter);
+    if (rx) (void)parlio_del_rx_unit(rx);
+    if (decorated) (void)parlio_tx_unit_undecorate_bitscrambler(tx);
+    if (tx) (void)parlio_del_tx_unit(tx);
+
+persist:
+    uint32_t best_mismatches = UINT32_MAX;
+    uint32_t best_offset = 0u;
+    uint32_t best_compared = 0u;
+    uint32_t best_first = UINT32_MAX;
+    for (size_t offset = 0u; offset <= 16u && offset < expected_bytes;
+         ++offset) {
+        const size_t compared = expected_bytes - offset;
+        uint32_t mismatches = 0u;
+        uint32_t first = UINT32_MAX;
+        for (size_t i = 0u; i < compared; ++i) {
+            if (s_tx_wbfm_actual[i] != s_tx_wbfm_expected[offset + i]) {
+                if (first == UINT32_MAX) first = (uint32_t)i;
+                mismatches++;
+            }
+        }
+        mismatches += (uint32_t)(expected_bytes - compared);
+        if (mismatches < best_mismatches) {
+            best_mismatches = mismatches;
+            best_offset = (uint32_t)offset;
+            best_compared = (uint32_t)compared;
+            best_first = first;
+        }
+    }
+
+    const tx_wbfm_header_t header = {
+        .magic = TX_WBFM_MAGIC,
+        .version = TX_WBFM_TEST_VARIANT == 1 ? 3u :
+                   (TX_WBFM_TEST_VARIANT == 2 ? 4u :
+                   (TX_WBFM_TEST_VARIANT == 3 ? 5u :
+                    (TX_WBFM_TEST_VARIANT == 4 ? 6u : 2u))),
+        .header_bytes = sizeof(tx_wbfm_header_t),
+        .input_bytes = sizeof(s_tx_wbfm_input),
+        .output_bytes = expected_bytes,
+        .setup_error = setup_err,
+        .rx_error = rx_err,
+        .tx_error = tx_err,
+        .elapsed_cycles = elapsed_cycles,
+        .cpu_hz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ * 1000000u,
+        .parlio_int_raw = PARL_IO.int_raw.val,
+        .parlio_tx_status = PARL_IO.tx_st0.val,
+        .parlio_rx_status = PARL_IO.rx_st0.val,
+        .best_offset = best_offset,
+        .compared = best_compared,
+        .mismatches = best_mismatches,
+        .first_mismatch = best_first,
+        .actual_hash = fnv1a_hash(s_tx_wbfm_actual,
+                                  sizeof(s_tx_wbfm_actual)),
+        .expected_hash = fnv1a_hash(s_tx_wbfm_expected,
+                                    sizeof(s_tx_wbfm_expected)),
+        .loop_error = loop_error,
+        .loop_written = (uint32_t)loop_written,
+        .loop_mismatches = loop_mismatches,
+        .loop_first_mismatch = loop_first_mismatch,
+        .reserved = {
+            lut_pre_mismatches, lut_pre_actual_hash, lut_pre_expected_hash,
+            lut_post_mismatches, lut_post_actual_hash,
+            lut_post_expected_hash,
+        },
+    };
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, MODEM_CAPTURE_SUBTYPE, "diagcap");
+    esp_err_t persist_err = partition ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (persist_err == ESP_OK)
+        persist_err = esp_partition_erase_range(partition, 0u,
+                                                partition->erase_size * 3u);
+    if (persist_err == ESP_OK)
+        persist_err = esp_partition_write(partition, sizeof(header),
+                                          s_tx_wbfm_actual,
+                                          sizeof(s_tx_wbfm_actual));
+    if (persist_err == ESP_OK)
+        persist_err = esp_partition_write(
+            partition, sizeof(header) + sizeof(s_tx_wbfm_actual),
+            s_tx_wbfm_expected, sizeof(s_tx_wbfm_expected));
+    if (persist_err == ESP_OK)
+        persist_err = esp_partition_write(partition, 0u, &header,
+                                          sizeof(header));
+    ESP_LOGW(TAG,
+             "TX WBFM setup=%s rx=%s tx=%s mismatch=%u offset=%u "
+             "cycles=%u int=%08x",
+             esp_err_to_name(setup_err), esp_err_to_name(rx_err),
+             esp_err_to_name(tx_err), (unsigned)best_mismatches,
+             (unsigned)best_offset, (unsigned)elapsed_cycles,
+             (unsigned)PARL_IO.int_raw.val);
+    if (persist_err != ESP_OK) return persist_err;
+    if (setup_err != ESP_OK) return setup_err;
+    if (rx_err != ESP_OK) return rx_err;
+    if (tx_err != ESP_OK) return tx_err;
+    return best_mismatches == 0u ? ESP_OK : ESP_FAIL;
 }
 
 static void oracle_task(void *argument)
@@ -1095,15 +1482,10 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
                                              s_modem_capture_signals[lane],
                                          false, false);
     }
-    /* Unlike MODEM_SYSCON_FPGA_DEBUG_CLK80, the clock-output mux has a
-     * documented GPIO-matrix route. This retained F160M probe established
-     * that a higher requested clock still does not raise C5 PARLIO RX beyond
-     * its approximately 40-MS/s ceiling. Correlation against the RF ring,
-     * never the nominal selector name, decides the actual cadence. */
-    GPIO_EXT.pin_ctrl.clk_out1 = CLKOUT_SIG_PLL_F160M;
-    PCR.ctrl_clk_out_en.clk160_oen = 1u;
-    esp_rom_gpio_connect_out_signal(MODEM_PARLIO_CLOCK_GPIO,
-                                    CLK_OUT_OUT1_IDX, false, false);
+    /* Use the same PLL-derived internal 40-MHz RX clock as production. The
+     * earlier 80/160-MHz external-clock probes established that C5 PARLIO RX
+     * still accepts about 40 MS/s; an unused faster clock only complicates
+     * this bounded byte-for-byte IQ proof. */
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
     uint32_t clock_transitions = 0u;
     uint32_t previous_clock =
@@ -1153,6 +1535,7 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
 
     parlio_rx_unit_handle_t rx = NULL;
     parlio_rx_delimiter_handle_t delimiter = NULL;
+    bitscrambler_handle_t rx_bs = NULL;
     const parlio_rx_unit_config_t rx_cfg = {
         .trans_queue_depth = 1u,
         .max_recv_size = MODEM_PARLIO_BYTES,
@@ -1161,10 +1544,10 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
          * granularity only and does not reduce the 80 MHz sample clock. */
         .dma_burst_size = 32u,
         .data_width = MODEM_CAPTURE_LANES,
-        .clk_src = PARLIO_CLK_SRC_EXTERNAL,
-        .ext_clk_freq_hz = MODEM_PARLIO_SAMPLE_RATE_HZ,
+        .clk_src = PARLIO_CLK_SRC_DEFAULT,
+        .ext_clk_freq_hz = 0u,
         .exp_clk_freq_hz = MODEM_PARLIO_SAMPLE_RATE_HZ,
-        .clk_in_gpio_num = MODEM_PARLIO_CLOCK_GPIO,
+        .clk_in_gpio_num = -1,
         .clk_out_gpio_num = -1,
         .valid_gpio_num = -1,
         .data_gpio_nums = {
@@ -1180,6 +1563,21 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
     err = parlio_new_rx_unit(&rx_cfg, &rx);
     c5vrx2_trace_stage_detail(311u, err, (uint32_t)(uintptr_t)rx, 0u, 0u);
     if (err != ESP_OK) goto cleanup_pins_only;
+
+#if CONFIG_C5VRX2_MODE_MODEM_WBFM
+    const bitscrambler_config_t bs_cfg = {
+        .dir = BITSCRAMBLER_DIR_RX,
+        .attach_to = SOC_BITSCRAMBLER_ATTACH_PARL_IO,
+    };
+    err = bitscrambler_new(&bs_cfg, &rx_bs);
+    c5vrx2_trace_stage_detail(316u, err, 0u, 0u, 0u);
+    if (err != ESP_OK) goto cleanup_rx;
+    err = bitscrambler_enable(rx_bs);
+    if (err == ESP_OK) err = c5vrx2_wbfm_q4_configure_delta(rx_bs);
+    if (err == ESP_OK) err = bitscrambler_reset(rx_bs);
+    c5vrx2_trace_stage_detail(317u, err, 0u, 0u, 0u);
+    if (err != ESP_OK) goto cleanup_bs;
+#endif
 
     const parlio_rx_soft_delimiter_config_t delimiter_cfg = {
         .sample_edge = PARLIO_SAMPLE_EDGE_POS,
@@ -1221,6 +1619,19 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
     }
     continuous_iq_debug_mark(441u);
 
+#if CONFIG_C5VRX2_MODE_MODEM_WBFM
+    /* DMA and the PARLIO clock are already ready, but rx_sw_en is still
+     * closed. Reset/start the attached processor only after real RF IQ is
+     * active so no pre-arm MODEM_DIAG bytes can enter its persistent state. */
+    err = bitscrambler_reset(rx_bs);
+    if (err == ESP_OK) err = bitscrambler_start(rx_bs);
+    if (err != ESP_OK) {
+        (void)continuous_iq_stop();
+        modem_capture_irq_restore(saved_mstatus);
+        goto cleanup_enabled_rx;
+    }
+#endif
+
     const uint32_t capture_begin = esp_cpu_get_cycle_count();
     PARL_IO.rx_mode_cfg.rx_sw_en = 1u;
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
@@ -1257,6 +1668,12 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
     const esp_err_t disable_err = parlio_rx_unit_disable(rx);
     if (receive_err != ESP_OK) err = receive_err;
     else if (disable_err != ESP_OK) err = disable_err;
+#if CONFIG_C5VRX2_MODE_MODEM_WBFM
+    const esp_err_t bs_reset_err = bitscrambler_reset(rx_bs);
+    const esp_err_t bs_disable_err = bitscrambler_disable(rx_bs);
+    if (err == ESP_OK && bs_reset_err != ESP_OK) err = bs_reset_err;
+    if (err == ESP_OK && bs_disable_err != ESP_OK) err = bs_disable_err;
+#endif
 
     REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
     REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
@@ -1267,7 +1684,7 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
     const void *ring = continuous_iq_ring_base();
     modem_capture_header_t header = {
         .magic = MODEM_CAPTURE_MAGIC,
-        .version = 7u,
+        .version = MODEM_PARLIO_WBFM_ENABLED ? 9u : 8u,
         .header_bytes = sizeof(modem_capture_header_t),
         .raw_words = MODEM_PARLIO_BYTES,
         .ring_words = C5VRX2_RF_WORDS,
@@ -1328,9 +1745,10 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
     }
 
     ESP_LOGW(TAG,
-             "MODEM PARLIO result=%s bytes=%u clock=%u rf_hz=%u "
+             "MODEM PARLIO%s result=%s bytes=%u clock=%u rf_hz=%u "
              "capture_ptr=%u stop_ptr=%u starts=%u wraps=%u triggers=%u "
              "int_raw=%08x rx_st0=%08x rx_st1=%08x",
+             MODEM_PARLIO_WBFM_ENABLED ? " WBFM" : "",
              esp_err_to_name(err), MODEM_PARLIO_BYTES,
              MODEM_PARLIO_SAMPLE_RATE_HZ,
              (unsigned)stats.rf_sample_rate_hz, capture_end_pointer,
@@ -1339,6 +1757,7 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
              (unsigned)parlio_int_raw, (unsigned)parlio_rx_st0,
              (unsigned)parlio_rx_st1);
 
+    if (rx_bs) bitscrambler_free(rx_bs);
     if (delimiter) (void)parlio_del_rx_delimiter(delimiter);
     if (rx) (void)parlio_del_rx_unit(rx);
     goto cleanup_pins_only;
@@ -1347,6 +1766,13 @@ cleanup_enabled_rx:
     (void)parlio_rx_unit_disable(rx);
 cleanup_delimiter:
     if (delimiter) (void)parlio_del_rx_delimiter(delimiter);
+#if CONFIG_C5VRX2_MODE_MODEM_WBFM
+cleanup_bs:
+    if (rx_bs) {
+        (void)bitscrambler_disable(rx_bs);
+        bitscrambler_free(rx_bs);
+    }
+#endif
 cleanup_rx:
     if (rx) (void)parlio_del_rx_unit(rx);
 cleanup_pins_only:

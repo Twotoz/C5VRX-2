@@ -170,6 +170,23 @@ static inline void start_writer_once(void)
     c5vrx2_start_control = REG32(DUMP_CTRL);
 }
 
+/* The PAU chain proved reliable, but its roughly 600-cycle restart latency is
+ * long enough for the fixed-rate consumer to eat into its ring lead. Issue the
+ * exact same four clean control images directly from the already parked LP
+ * core. DONE must never be copied back into the control register. */
+static inline void rearm_writer_direct(void)
+{
+    uint32_t c = REG32(DUMP_CTRL) &
+                 ~(CTRL_ENABLE | CTRL_START | CTRL_DONE);
+    REG32(DUMP_CTRL) = c;
+    fence_io();
+    c |= CTRL_ENABLE;
+    REG32(DUMP_CTRL) = c;
+    REG32(DUMP_CTRL) = c | CTRL_START;
+    REG32(DUMP_CTRL) = c;
+    fence_io();
+}
+
 static inline bool rearm_regdma_now(void)
 {
     REG32(PAU_INT_CLR) = PAU_DONE_RAW | PAU_ERROR_RAW;
@@ -334,12 +351,11 @@ static void run_continuous(void)
         if ((control & CTRL_DONE) != 0u && current == PTR_MASK) {
             const uint32_t completed_at = now;
 
-            /* HOT PATH: start the proven four-node hardware chain before any
-             * block statistics or consumer bookkeeping. */
-            if (!rearm_regdma_now()) {
-                c5vrx2_fail_reason = FAIL_PAU_CHAIN;
-                goto fail;
-            }
+            /* HOT PATH: the parked LP core performs the same four modem writes
+             * as the reliable REGDMA chain without PAU setup/poll latency.
+             * PARLIO must keep its fixed 20 MHz timebase throughout: stopping
+             * it here stretches CVBS lines and destroys H-sync/chroma lock. */
+            rearm_writer_direct();
 
             const uint32_t fill = completed_at - fill_started;
             c5vrx2_fill_cycles_last = fill;
