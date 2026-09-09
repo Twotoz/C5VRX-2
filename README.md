@@ -1,51 +1,66 @@
 # C5VRX-2
 
-Clean ESP32-C5 realtime analog-FPV receiver experiment.
+ESP32-C5 experiment for receiving 5.8 GHz analog FPV directly as continuous
+complex IQ and forwarding the recovered composite waveform to a six-bit
+resistor DAC.
 
-The branch `realtime-iq-parlio` deliberately starts from the C5VRX proof24 RF/IQ facts and strips the receiver back to the shortest hardware datapath:
+Target pipeline:
 
 ```text
-A1 / 5865 MHz
-      ↓
-mode-0 packed Q10/I10 writer
-      ↓
-fixed 16K RF dump SRAM
-      ↓
-DONE + PTR=16383
-      ↓
-PAU / REGDMA immediate rearm
-      ↓
-looping RF-SRAM consumer
-      ↓
-BitScrambler: phase -> dphi, decimate 4:1
-      ↓
-20 MS/s PARLIO
-      ↓
-XIAO D4..D9 six-resistor DAC
+A1 / 5865 MHz RF
+  -> autonomous RF frontend / live MODEM_DIAG IQ tap
+  -> coherent 2:1 capture by 40-MS/s PARLIO RX
+  -> adjacent-sample WBFM discriminator
+  -> real-domain filtering / rate conversion
+  -> continuous PARLIO/GDMA
+  -> D4..D9 resistor DAC
+  -> 75-ohm CVBS input
 ```
 
-## Non-negotiable realtime rules
+The normal live path does not decode or regenerate PAL. Sync, blanking, luma,
+burst and chroma are already present in the VTX's FM modulation and remain one
+real waveform after FM demodulation.
 
-- VTX presence is **never** required to produce IQ.
-- VTX OFF is valid: off-air noise/spurs still flow through the datapath.
-- `NO_RF`, PAL/NTSC detection, sync/burst analysis and USB are not producer gates.
-- The full vendor `adctrig()` lifecycle is not repeated per 16K generation.
-- At the 16K boundary, REGDMA restart is launched before counters, logging, DSP or consumer bookkeeping.
-- No full 64 KiB per-block memcpy exists in the realtime path.
-- RF SRAM feeds the looping BitScrambler/PARLIO transaction directly.
-- HP is parked while MAC owns the fixed dump SRAM. USB is useful before a run or after a fault, never required during RF acquisition.
+## Current status
 
-## First hardware gate
+- `continuous_iq_start()` uses the vendor-derived C5 TX_START selector plus
+  the bit-17 dump-first state proven by a one-start hardware soak. It sets
+  ENABLE once; it never emits START, waits for DONE, rearms, times out or tears
+  RF down while running. LIVE keeps HP SRAM CPU-owned because its samples come
+  from MODEM_DIAG; bounded ring diagnostics grant the fixed dump bank only for
+  their capture window.
+- The reader API models contiguous ring spans and preserves logical positions,
+  but the active MAC-owned SRAM exposes only a stale view to CPU and AHB-GDMA.
+  It is not a usable simultaneous live source.
+- A simultaneous MODEM_DIAG/ring capture physically proved
+  `DIAG[6:9] = Q[6:9]` and `DIAG[16:19] = I[6:9]`. With the VTX on, all eight
+  individual bits matched the post-stop Q10/I10 ring with 94.75% aggregate
+  bit accuracy despite asynchronous CPU sampling. This is the live 4+4-bit
+  IQ source for the XIAO.
+- Bounded PARLIO tests at the C5's 40-MHz receive limit captured a bit-perfect
+  sequence of every second native MODEM sample. Requesting F80 or F160 did not
+  raise the observed receive cadence beyond about 40 MS/s; the native MODEM
+  and dump cadence remained about 80 MS/s.
+- LIVE now routes Q4/I4 through internal GPIO-matrix loopback into an infinite
+  PARLIO-RX/GDMA ring. A two-bundle TX BitScrambler consumes two raw bytes per
+  20-MS/s DAC sample and evaluates phase change between consecutive retained
+  Q3/I2 states. PARLIO-TX continuously loops the same elastic ring into the
+  existing D4..D9 DAC. No PAL decoder, framebuffer or PAL regenerator is in
+  this normal path.
+- On 2026-09-09 the merged `69f52c3` LIVE image produced a stably locked,
+  clearly recognizable NTSC camera picture through the six-bit DAC on physical
+  XIAO ESP32-C5 hardware. Visible static remains, so this proves functional
+  end-to-end RF-to-CVBS recovery but not production picture quality.
+- USB Serial/JTAG remains scheduled. It is telemetry only and never controls or
+  paces RF, DSP or PARLIO.
+- Release builds use ESP-IDF 6.0.1 and 40 MHz DIO flash to avoid the observed
+  ESP32-C5 rev1 startup/MSPI lockup with the tested 6.0.2 build.
 
-Flash `realtime-iq-parlio`, connect the existing D4..D9 resistor DAC to AV, and boot with the VTX **off**. The branch starts automatically; there is no capture command.
+The autonomous circular writer, Q4/I4 mapping, bounded 80-to-40 sample
+relationship and recognizable locked live NTSC output are proven. The code
+does **not** yet claim long-duration slip-free 80-to-40 capture, sample-gapless
+RF time, glitch-free RX/TX DMA boundaries, or production-quality recovered
+CVBS.
 
-Expected behavior:
-
-1. VTX OFF: the physical AV output is still active with RF-dependent/off-air waveform.
-2. Turn VTX ON at A1/5865 without resetting anything: output must change immediately.
-3. Turn VTX OFF again: producer must continue instead of entering a `NO_RF` state.
-4. If the LP producer hits a real writer/rearm fault it restores SRAM ownership and the HP core prints the stored counters/fault registers.
-
-Recognizable stable video is **not** the first acceptance criterion. First prove that RF acquisition and PARLIO consumption remain alive continuously across VTX OFF -> ON -> OFF.
-
-See `docs/realtime-iq-plan.md` for the implementation contract and `docs/hardware-test.md` for the hardware gate.
+See [the realtime contract](docs/realtime-iq-plan.md) and
+[hardware tests](docs/hardware-test.md).
