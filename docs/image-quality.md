@@ -121,5 +121,16 @@ not add unconditional gap filling: first correlate any visible line with a
 proven transport discontinuity. Filtering/de-emphasis remains a valid later
 quality step after discriminator ambiguity is reduced.
 
+### Centroid-output A/B
+
+Keeping the same 32 phase5 states but evaluating their actual Q4 cluster
+centroids at phase8 precision expanded the pair LUT from 13 to 34 DAC codes
+without adding an instruction bundle. Host validation reduced phase error
+slightly from 3.27 to 3.25 degrees RMS. The first live A/B remained locked
+and no longer visibly rolled during the short observation, but the user saw
+no material reduction in static or grey cast. More output levels alone are
+therefore not the primary static fix; the measured unreliable low-amplitude
+phase transitions must be addressed next.
+
 Set `CONFIG_C5VRX2_WBFM_PHASE5_QUALITY=n` to restore the known-working Q3/I2
 baseline while preserving the rest of the direct RX-ring-to-TX architecture.

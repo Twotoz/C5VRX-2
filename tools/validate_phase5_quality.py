@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
 
@@ -37,6 +38,27 @@ def phase5(packed: int) -> int:
     return round(exact_phase(packed) * 32.0 / TAU) & 0x1F
 
 
+def phase5_centroids() -> list[float]:
+    result: list[float] = []
+    for state in range(32):
+        members = [exact_phase(packed) for packed in range(256)
+                   if phase5(packed) == state]
+        sine = sum(math.sin(value) for value in members)
+        cosine = sum(math.cos(value) for value in members)
+        result.append(math.atan2(sine, cosine))
+    return result
+
+
+def phase5_centroid_phase8() -> list[int]:
+    return [round(value * 256.0 / TAU) for value in phase5_centroids()]
+
+
+def centroid_delta_phase8(previous: int, current: int) -> int:
+    centers = phase5_centroid_phase8()
+    delta = (centers[current] - centers[previous] + 128) % 256 - 128
+    return delta
+
+
 def scale_real_sum(value: int, calibration_gain: int = 2) -> int:
     numerator = value * (calibration_gain + 1)
     return -((-numerator + 2) // 4) if numerator < 0 else (numerator + 2) // 4
@@ -46,10 +68,8 @@ def build_lut() -> list[int]:
     lut = [0] * 1024
     for previous in range(32):
         for current in range(32):
-            delta = (current - previous) & 0x1F
-            if delta >= 16:
-                delta -= 32
-            code = max(0, min(63, 20 + scale_real_sum(delta * 8)))
+            delta = centroid_delta_phase8(previous, current)
+            code = max(0, min(63, 20 + scale_real_sum(delta)))
             lut[(previous << 5) | current] = code
     for packed in range(256):
         lut[packed] |= phase5(packed) << 8
@@ -83,8 +103,26 @@ def validate_sources(repo: Path) -> None:
     assert "CONFIG_C5VRX2_WBFM_PHASE5_QUALITY=y" in defaults
 
 
+def rewrite_embedded_lut(repo: Path) -> None:
+    path = repo / "main" / "c5vrx2_wbfm_q4_phase5_2to1.bsasm"
+    lines = path.read_text().splitlines()
+    replacement = "lut " + " ".join(map(str, build_lut()))
+    lut_lines = [index for index, line in enumerate(lines)
+                 if line.startswith("lut ")]
+    if len(lut_lines) != 1:
+        raise RuntimeError("expected exactly one embedded LUT")
+    lines[lut_lines[0]] = replacement
+    path.write_text("\n".join(lines) + "\n")
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rewrite-lut", action="store_true",
+                        help="regenerate the embedded assembly LUT")
+    args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
+    if args.rewrite_lut:
+        rewrite_embedded_lut(repo)
     validate_sources(repo)
     lut = build_lut()
     assert len(lut) == 1024
@@ -96,10 +134,8 @@ def main() -> int:
     for previous in range(32):
         for current in range(32):
             index = (previous << 5) | current
-            delta = (current - previous) & 0x1F
-            if delta >= 16:
-                delta -= 32
-            expected = max(0, min(63, 20 + scale_real_sum(delta * 8)))
+            delta = centroid_delta_phase8(previous, current)
+            expected = max(0, min(63, 20 + scale_real_sum(delta)))
             assert (lut[index] & 0x3F) == expected
 
     cartesian_errors: list[float] = []
@@ -112,7 +148,7 @@ def main() -> int:
         reference = exact_phase(packed)
         cartesian_errors.append(abs(wrapped(compact_iq5_phase(packed) -
                                             reference)))
-        quantized = phase5(packed) * TAU / 32.0
+        quantized = phase5_centroids()[phase5(packed)]
         polar_errors.append(abs(wrapped(quantized - reference)))
 
     cartesian_rms = rms_degrees(cartesian_errors)
@@ -128,11 +164,15 @@ def main() -> int:
         branch_delta -= 32
     assert branch_delta == 1
 
+    output_codes = sorted({value & 0x3F for value in lut})
+    assert len(output_codes) == 34
+
     print("five-bit polar WBFM quality validation PASS")
     print(f"  Q3/I2 Cartesian phase error: {cartesian_rms:.2f} deg RMS, "
           f"{cartesian_max:.2f} deg max")
     print(f"  phase5 polar phase error:     {polar_rms:.2f} deg RMS, "
           f"{polar_max:.2f} deg max")
+    print(f"  centroid delta DAC levels:    {len(output_codes)}")
     print("  all 1024 dual-purpose LUT entries and modulo wrap verified")
     return 0
 
