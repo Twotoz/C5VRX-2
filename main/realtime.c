@@ -212,7 +212,12 @@ static esp_err_t start_tx_ring(void)
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
     const parlio_transmit_config_t cfg = {
         .idle_value = cal->pedestal_code,
-        .bitscrambler_program = c5vrx2_wbfm_q4_iq5_program(),
+        .bitscrambler_program =
+#if CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
+            c5vrx2_wbfm_q4_phase5_program(),
+#else
+            c5vrx2_wbfm_q4_iq5_program(),
+#endif
         .flags.loop_transmission = true,
     };
     return parlio_tx_unit_transmit(s_tx, s_raw_ring,

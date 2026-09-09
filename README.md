@@ -51,6 +51,11 @@ real waveform after FM demodulation.
   clearly recognizable NTSC camera picture through the six-bit DAC on physical
   XIAO ESP32-C5 hardware. Visible static remains, so this proves functional
   end-to-end RF-to-CVBS recovery but not production picture quality.
+
+The next image-quality path keeps that transport unchanged and replaces the
+asymmetric Q3/I2 phase approximation with a full-input, uniform five-bit
+polar phase LUT. Its design, reproducible builds and physical proof gates are
+documented in [docs/image-quality.md](docs/image-quality.md).
 - USB Serial/JTAG remains scheduled. It is telemetry only and never controls or
   paces RF, DSP or PARLIO.
 - Release builds use ESP-IDF 6.0.1 and 40 MHz DIO flash to avoid the observed
