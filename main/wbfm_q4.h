@@ -14,7 +14,6 @@ esp_err_t c5vrx2_wbfm_q4_configure_phase5(bitscrambler_handle_t handle);
 esp_err_t c5vrx2_wbfm_q4_load_tx_lut(void);
 esp_err_t c5vrx2_wbfm_q4_load_tx_lut3(void);
 esp_err_t c5vrx2_wbfm_q4_load_tx_iq5(void);
-esp_err_t c5vrx2_wbfm_q4_load_tx_phase5(void);
 uint32_t c5vrx2_wbfm_q4_verify_tx_iq5_lut(uint32_t *actual_hash,
                                           uint32_t *expected_hash);
 size_t c5vrx2_wbfm_q4_reference(const uint8_t *input, size_t input_bytes,
@@ -31,6 +30,7 @@ size_t c5vrx2_wbfm_q4_iq5_reference(const uint8_t *input,
 size_t c5vrx2_wbfm_q4_phase5_reference(const uint8_t *input,
                                        size_t input_bytes, uint8_t *output,
                                        size_t output_bytes);
+uint8_t c5vrx2_wbfm_q4_phase5_value(uint8_t packed);
 const void *c5vrx2_wbfm_q4_program(void);
 const void *c5vrx2_wbfm_q4_fast_program(void);
 const void *c5vrx2_wbfm_q4_lut3_program(void);

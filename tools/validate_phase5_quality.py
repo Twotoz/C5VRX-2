@@ -66,15 +66,18 @@ def validate_sources(repo: Path) -> None:
     source = (repo / "main" / "wbfm_q4.c").read_text()
     realtime = (repo / "main" / "realtime.c").read_text()
     defaults = (repo / "sdkconfig.quality.defaults").read_text()
-    assert asm.count("read 16") == 1
+    # The first read primes the phase LUT once. Thereafter the emit bundle
+    # reads the next pair while writing the preceding pair, leaving exactly
+    # two steady-state bundles per output.
+    assert asm.count("read 16") == 2
     assert asm.count("write 8") == 1
+    assert asm.count("set 16 8") == 2
+    assert "jmp address_delta" in asm
     assert "set 16 L8" in asm and "set 20 L12" in asm
     assert "set 21 O8" in asm and "set 25 O12" in asm
     assert "set 0..5 L0..L5" in asm
-    assert "build_phase5_lut" in source
-    assert "lut[packed] |= (uint16_t)q4_phase5(packed) << 8u" in source
-    assert "scale_real_sum(delta * 8" in source
-    assert "c5vrx2_wbfm_q4_load_tx_phase5" in realtime
+    assert "lut " + " ".join(map(str, build_lut())) in asm
+    assert "q4_phase5" in source
     assert "c5vrx2_wbfm_q4_phase5_program" in realtime
     assert "CONFIG_C5VRX2_MODE_LIVE=y" in defaults
     assert "CONFIG_C5VRX2_WBFM_PHASE5_QUALITY=y" in defaults

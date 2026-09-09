@@ -83,6 +83,11 @@ static uint8_t q4_phase5(unsigned packed)
     return (uint8_t)phase5 & 0x1fu;
 }
 
+uint8_t c5vrx2_wbfm_q4_phase5_value(uint8_t packed)
+{
+    return q4_phase5(packed);
+}
+
 static uint8_t q4_compact_iq5(unsigned packed)
 {
     /* Keep Q[9:7] and I[9:8] from the physically proven Q4/I4 byte. */
@@ -188,43 +193,15 @@ static void build_iq5_lut(uint16_t lut[LUT_ITEMS])
     }
 }
 
-static void build_phase5_lut(uint16_t lut[LUT_ITEMS])
-{
-    const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
-    /* Low six bits serve the second lookup for every possible pair of
-     * uniform phase states. One phase5 step equals eight phase8 steps. */
-    for (unsigned previous = 0u; previous < 32u; ++previous) {
-        for (unsigned current = 0u; current < 32u; ++current) {
-            int delta = (int)((current - previous) & 0x1fu);
-            if (delta >= 16) delta -= 32;
-            if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
-                delta = -delta;
-            int code = (int)cal->pedestal_code +
-                       scale_real_sum(delta * 8, cal->discriminator_gain);
-            if (code < 0) code = 0;
-            if (code > 63) code = 63;
-            lut[(previous << 5u) | current] = (uint16_t)code;
-        }
-    }
-    /* The first lookup addresses only 0..255 with the original Q4/I4 byte.
-     * Its high five result bits carry polar phase without disturbing the low
-     * six discriminator/output bits used when these addresses occur in the
-     * second lookup. */
-    for (unsigned packed = 0u; packed < 256u; ++packed)
-        lut[packed] |= (uint16_t)q4_phase5(packed) << 8u;
-}
-
 esp_err_t c5vrx2_wbfm_q4_configure_phase5(bitscrambler_handle_t handle)
 {
     if (!handle) return ESP_ERR_INVALID_ARG;
-    uint16_t *lut = heap_caps_malloc(LUT_BYTES, MALLOC_CAP_INTERNAL);
-    if (!lut) return ESP_ERR_NO_MEM;
-    build_phase5_lut(lut);
-    esp_err_t err = bitscrambler_load_program(
+    /* The TX transaction reloads this program. Keep its LUT embedded so the
+     * instructions and table become active atomically in that same load. A
+     * bounded C5 oracle proved that a separately preloaded LUT is not retained
+     * by the active PARLIO TX run, whereas embedded LUT data is byte-exact. */
+    return bitscrambler_load_program(
         handle, c5vrx2_wbfm_q4_phase5_2to1_program);
-    if (err == ESP_OK) err = bitscrambler_load_lut(handle, lut, LUT_BYTES);
-    free(lut);
-    return err;
 }
 
 esp_err_t c5vrx2_wbfm_q4_configure_iq5(bitscrambler_handle_t handle)
@@ -324,23 +301,6 @@ esp_err_t c5vrx2_wbfm_q4_load_tx_iq5(void)
     uint16_t *lut = heap_caps_malloc(LUT_BYTES, MALLOC_CAP_INTERNAL);
     if (!lut) return ESP_ERR_NO_MEM;
     build_iq5_lut(lut);
-    bitscrambler_ll_set_lut_width(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
-                                  BITSCRAMBLER_LUT_WIDTH_32BIT);
-    const uint32_t *words = (const uint32_t *)lut;
-    for (unsigned word = 0u; word < LUT_BYTES / sizeof(uint32_t); ++word)
-        bitscrambler_ll_lutmem_write(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
-                                     (int)word, words[word]);
-    bitscrambler_ll_set_lut_width(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
-                                  BITSCRAMBLER_LUT_WIDTH_16BIT);
-    free(lut);
-    return ESP_OK;
-}
-
-esp_err_t c5vrx2_wbfm_q4_load_tx_phase5(void)
-{
-    uint16_t *lut = heap_caps_malloc(LUT_BYTES, MALLOC_CAP_INTERNAL);
-    if (!lut) return ESP_ERR_NO_MEM;
-    build_phase5_lut(lut);
     bitscrambler_ll_set_lut_width(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
                                   BITSCRAMBLER_LUT_WIDTH_32BIT);
     const uint32_t *words = (const uint32_t *)lut;

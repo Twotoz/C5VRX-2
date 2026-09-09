@@ -83,8 +83,9 @@ config C5VRX2_WBFM_PHASE5_QUALITY
     depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_TX_WBFM_TEST
     default y
     help
-        Use a three-bundle dual-purpose LUT that maps the complete Q4/I4 byte
-        to uniform five-bit phase before FM differencing. Disable this to use
-        the physically proven two-bundle Q3/I2 Cartesian fallback.
+        Use an embedded dual-purpose LUT that maps the complete Q4/I4 byte to
+        uniform five-bit phase before FM differencing. A one-time prime is
+        followed by a two-bundle steady-state pipeline. Disable this to use
+        the physically proven Q3/I2 Cartesian fallback.
 
 endmenu

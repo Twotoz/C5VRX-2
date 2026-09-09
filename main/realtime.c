@@ -187,13 +187,6 @@ static esp_err_t prepare_tx(void)
     if (trace_step(20u, err) != ESP_OK) return err;
     err = parlio_tx_unit_decorate_bitscrambler(s_tx);
     if (trace_step(21u, err) != ESP_OK) return err;
-#if CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
-    /* The quality program has no embedded LUT. Load its dual-purpose table
-     * after the decorator owns the TX channel; transaction start loads only
-     * instructions and therefore leaves this LUT intact. */
-    err = c5vrx2_wbfm_q4_load_tx_phase5();
-    if (trace_step(23u, err) != ESP_OK) return err;
-#endif
     err = parlio_tx_unit_enable(s_tx);
     return trace_step(22u, err);
 }

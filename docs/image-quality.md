@@ -49,25 +49,36 @@ docker run --rm -v "${PWD}:/project" -w /project espressif/idf:v6.0.1 `
   -D SDKCONFIG_DEFAULTS=/project/sdkconfig.quality-test.defaults build
 ```
 
-The oracle sends deterministic Q4/I4 input through the exact three-bundle TX
-BitScrambler at the production 40-to-20 MS/s ratio and captures the low four
-DAC bits through PARLIO RX. Its persisted result must match the C reference
-byte-for-byte before the quality core is called physically proven.
+The oracle sends deterministic Q4/I4 input through the exact TX BitScrambler
+at the production 40-to-20 MS/s ratio and captures the low four DAC bits
+through PARLIO RX. The program primes once and then executes two bundles per
+output. Its persisted result must match the C reference byte-for-byte before
+the quality core is called physically proven.
 
 ## Proof status
 
-Software proven:
+Software and bounded-hardware proven:
 
 - full-Q4/I4 to uniform phase5 mapping;
 - all 1024 dual-purpose LUT entries;
 - circular delta including the 31-to-0 wrap;
-- both LIVE and bounded diagnostic ESP-IDF 6.0.1 builds.
+- both LIVE and bounded diagnostic ESP-IDF 6.0.1 builds;
+- embedded 16-bit LUT high-lane oracle: 4000/4000 exact at 20 MS/s;
+- complete two-bundle phase5 core: 4000/4000 exact, zero offset and no
+  PARLIO RX/TX error at 20 MS/s;
+- live NTSC remains locked and recognizable, shows substantial colour, and
+  has visibly less static than the Q3/I2 PR2 baseline.
 
-Still requiring hardware proof:
+The hardware oracle also found a C5/IDF 6.0.1 lifecycle trap: loading the
+dual-purpose LUT before the PARLIO TX transaction did not give the active run
+the intended table. Embedding the LUT in the BitScrambler program makes the
+instruction and LUT load atomic and produced byte-exact hardware output.
+Direct register LUT “readback” returned only zeroes and is not treated as a
+valid proof mechanism on this target.
 
-- three-bundle TX BitScrambler sustains 20 MS/s without underrun;
-- bounded output matches the C reference byte-for-byte;
-- live image has less static than the Q3/I2 baseline;
+Still requiring hardware proof or tuning:
+
+- reduce the remaining static and grey cast without losing NTSC lock/colour;
 - no hidden discontinuity at long-running RX/TX ring boundaries.
 
 Set `CONFIG_C5VRX2_WBFM_PHASE5_QUALITY=n` to restore the known-working Q3/I2
