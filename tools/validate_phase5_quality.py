@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import math
 from pathlib import Path
 
@@ -53,6 +54,7 @@ def phase5_state(packed: int) -> int:
     return 0 if phase == 31 else phase
 
 
+@functools.lru_cache(maxsize=None)
 def phase5_centroids() -> list[float]:
     result: list[float] = []
     for state in range(INVALID_STATE):
@@ -64,6 +66,7 @@ def phase5_centroids() -> list[float]:
     return result
 
 
+@functools.lru_cache(maxsize=None)
 def phase5_centroid_phase8() -> list[int]:
     return [round(value * 256.0 / TAU) for value in phase5_centroids()]
 
