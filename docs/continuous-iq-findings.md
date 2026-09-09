@@ -256,3 +256,27 @@ A/B-boundary continuity test remain required. The embedded LUT currently uses
 pedestal 20, current-minus-previous polarity and the default 1.5x
 post-difference gain; runtime calibration changes require regenerating or
 selecting another embedded LUT.
+
+## First end-to-end live NTSC lock
+
+On 2026-09-09 the merged LIVE image from commit `69f52c3` was flashed to a
+physical XIAO ESP32-C5 and tested with an NTSC FPV camera/VTX. The goggles
+locked immediately and displayed a clearly recognizable moving camera image.
+The image still contained visible static. This physically proves the complete
+functional path:
+
+```text
+live MODEM_DIAG Q4/I4
+ -> cyclic PARLIO RX at 40 MS/s
+ -> raw 16-KiB ring
+ -> direct two-bundle TX BitScrambler discriminator
+ -> cyclic PARLIO TX at 20 MS/s
+ -> six-bit resistor DAC
+ -> locked NTSC receiver picture
+```
+
+It does not yet prove sample-perfect operation at every long-duration RX/TX
+ring boundary, RF-time continuity across the private dump-SRAM wrap, or that
+the compact `n -> n+2` discriminator never aliases at the VTX's full deviation.
+Those remain separate scope/capture tests. The observed static is likewise a
+remaining signal-quality problem, not a transport-startup failure.

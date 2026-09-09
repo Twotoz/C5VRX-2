@@ -42,20 +42,25 @@ real waveform after FM demodulation.
   raise the observed receive cadence beyond about 40 MS/s; the native MODEM
   and dump cadence remained about 80 MS/s.
 - LIVE now routes Q4/I4 through internal GPIO-matrix loopback into an infinite
-  PARLIO-RX/GDMA ring. RX BitScrambler state performs adjacent FM on every
-  acquired 40-MS/s sample, then a real two-sample boxcar produces 20-MS/s raw
-  recovered CVBS. PARLIO-TX continuously loops the same elastic ring into the
+  PARLIO-RX/GDMA ring. A two-bundle TX BitScrambler consumes two raw bytes per
+  20-MS/s DAC sample and evaluates phase change between consecutive retained
+  Q3/I2 states. PARLIO-TX continuously loops the same elastic ring into the
   existing D4..D9 DAC. No PAL decoder, framebuffer or PAL regenerator is in
   this normal path.
+- On 2026-09-09 the merged `69f52c3` LIVE image produced a stably locked,
+  clearly recognizable NTSC camera picture through the six-bit DAC on physical
+  XIAO ESP32-C5 hardware. Visible static remains, so this proves functional
+  end-to-end RF-to-CVBS recovery but not production picture quality.
 - USB Serial/JTAG remains scheduled. It is telemetry only and never controls or
   paces RF, DSP or PARLIO.
 - Release builds use ESP-IDF 6.0.1 and 40 MHz DIO flash to avoid the observed
   ESP32-C5 rev1 startup/MSPI lockup with the tested 6.0.2 build.
 
-The autonomous circular writer, Q4/I4 mapping and bounded 80-to-40 sample
-relationship are proven. The code does **not** yet claim long-duration
-slip-free 80-to-40 capture, sample-gapless RF time, glitch-free RX/TX DMA
-boundaries, or production-quality recovered CVBS.
+The autonomous circular writer, Q4/I4 mapping, bounded 80-to-40 sample
+relationship and recognizable locked live NTSC output are proven. The code
+does **not** yet claim long-duration slip-free 80-to-40 capture, sample-gapless
+RF time, glitch-free RX/TX DMA boundaries, or production-quality recovered
+CVBS.
 
 See [the realtime contract](docs/realtime-iq-plan.md) and
 [hardware tests](docs/hardware-test.md).

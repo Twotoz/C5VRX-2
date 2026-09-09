@@ -62,10 +62,17 @@ adjacent phase across many physical `16383 -> 0` wraps. The old
 `C5VRX2_MODE_RF_WRAP` CPU reader sees the stale MAC-owned SRAM view and therefore
 cannot supply this proof; its output must not be accepted as gapless evidence.
 
-## 7. Live recovered CVBS
+## 7. Live recovered CVBS (functional picture passed)
 
 Do not use the stale MAC-owned SRAM view for this test. The default LIVE mode
-uses MODEM_DIAG Q4/I4 -> infinite PARLIO RX -> adjacent FM -> real 2:1 boxcar
--> continuous PARLIO TX. Repeat VTX OFF -> ON -> OFF and verify recovered sync,
-blanking, burst and picture on a scope/decoder. Separately verify both cyclic
-DMA boundaries introduce no missing, duplicated or stretched DAC sample.
+uses MODEM_DIAG Q4/I4 -> infinite PARLIO RX -> compact two-sample TX-BS WBFM
+-> continuous PARLIO TX. On 2026-09-09 commit `69f52c3` produced a stable lock
+and clearly recognizable NTSC camera video through the resistor DAC. Visible
+static remains; receiver sync lock and picture recovery are therefore proven,
+but blanking levels, burst/chroma accuracy and production signal quality are
+not yet proven on measurement equipment.
+
+Repeat VTX OFF -> ON -> OFF while capturing the raw Q4 and DAC waveform. Verify
+the `n -> n+2` phase interval remains unambiguous, quantify the static source,
+and separately prove that both cyclic DMA boundaries introduce no missing,
+duplicated or stretched DAC sample.
