@@ -25,6 +25,8 @@ BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_q4_lut3_2to1_program,
                     "c5vrx2_wbfm_q4_lut3_2to1");
 BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_q4_iq5_2to1_program,
                     "c5vrx2_wbfm_q4_iq5_2to1");
+BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_q4_phase5_2to1_program,
+                    "c5vrx2_wbfm_q4_phase5_2to1");
 BITSCRAMBLER_PROGRAM(c5vrx2_q4_delta_program, "c5vrx2_q4_delta");
 #if CONFIG_C5VRX2_WBFM_SELFTEST_ONCE
 BITSCRAMBLER_PROGRAM(c5vrx2_q4_phase_program, "c5vrx2_q4_phase");
@@ -70,6 +72,15 @@ static uint8_t q4_phase4(unsigned packed)
     int phase4 = (int)lrintf(atan2f(q, i) *
                              (16.0f / (2.0f * PI_F)));
     return (uint8_t)phase4 & 0x0fu;
+}
+
+static uint8_t q4_phase5(unsigned packed)
+{
+    const float q = signed_bucket_center(packed & 0x0fu, 4u);
+    const float i = signed_bucket_center(packed >> 4u, 4u);
+    const int phase5 = (int)lrintf(atan2f(q, i) *
+                                    (32.0f / (2.0f * PI_F)));
+    return (uint8_t)phase5 & 0x1fu;
 }
 
 static uint8_t q4_compact_iq5(unsigned packed)
@@ -177,6 +188,45 @@ static void build_iq5_lut(uint16_t lut[LUT_ITEMS])
     }
 }
 
+static void build_phase5_lut(uint16_t lut[LUT_ITEMS])
+{
+    const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
+    /* Low six bits serve the second lookup for every possible pair of
+     * uniform phase states. One phase5 step equals eight phase8 steps. */
+    for (unsigned previous = 0u; previous < 32u; ++previous) {
+        for (unsigned current = 0u; current < 32u; ++current) {
+            int delta = (int)((current - previous) & 0x1fu);
+            if (delta >= 16) delta -= 32;
+            if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
+                delta = -delta;
+            int code = (int)cal->pedestal_code +
+                       scale_real_sum(delta * 8, cal->discriminator_gain);
+            if (code < 0) code = 0;
+            if (code > 63) code = 63;
+            lut[(previous << 5u) | current] = (uint16_t)code;
+        }
+    }
+    /* The first lookup addresses only 0..255 with the original Q4/I4 byte.
+     * Its high five result bits carry polar phase without disturbing the low
+     * six discriminator/output bits used when these addresses occur in the
+     * second lookup. */
+    for (unsigned packed = 0u; packed < 256u; ++packed)
+        lut[packed] |= (uint16_t)q4_phase5(packed) << 8u;
+}
+
+esp_err_t c5vrx2_wbfm_q4_configure_phase5(bitscrambler_handle_t handle)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    uint16_t *lut = heap_caps_malloc(LUT_BYTES, MALLOC_CAP_INTERNAL);
+    if (!lut) return ESP_ERR_NO_MEM;
+    build_phase5_lut(lut);
+    esp_err_t err = bitscrambler_load_program(
+        handle, c5vrx2_wbfm_q4_phase5_2to1_program);
+    if (err == ESP_OK) err = bitscrambler_load_lut(handle, lut, LUT_BYTES);
+    free(lut);
+    return err;
+}
+
 esp_err_t c5vrx2_wbfm_q4_configure_iq5(bitscrambler_handle_t handle)
 {
     if (!handle) return ESP_ERR_INVALID_ARG;
@@ -274,6 +324,23 @@ esp_err_t c5vrx2_wbfm_q4_load_tx_iq5(void)
     uint16_t *lut = heap_caps_malloc(LUT_BYTES, MALLOC_CAP_INTERNAL);
     if (!lut) return ESP_ERR_NO_MEM;
     build_iq5_lut(lut);
+    bitscrambler_ll_set_lut_width(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
+                                  BITSCRAMBLER_LUT_WIDTH_32BIT);
+    const uint32_t *words = (const uint32_t *)lut;
+    for (unsigned word = 0u; word < LUT_BYTES / sizeof(uint32_t); ++word)
+        bitscrambler_ll_lutmem_write(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
+                                     (int)word, words[word]);
+    bitscrambler_ll_set_lut_width(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
+                                  BITSCRAMBLER_LUT_WIDTH_16BIT);
+    free(lut);
+    return ESP_OK;
+}
+
+esp_err_t c5vrx2_wbfm_q4_load_tx_phase5(void)
+{
+    uint16_t *lut = heap_caps_malloc(LUT_BYTES, MALLOC_CAP_INTERNAL);
+    if (!lut) return ESP_ERR_NO_MEM;
+    build_phase5_lut(lut);
     bitscrambler_ll_set_lut_width(&BITSCRAMBLER, BITSCRAMBLER_DIR_TX,
                                   BITSCRAMBLER_LUT_WIDTH_32BIT);
     const uint32_t *words = (const uint32_t *)lut;
@@ -438,6 +505,31 @@ size_t c5vrx2_wbfm_q4_iq5_reference(const uint8_t *input,
     return pairs;
 }
 
+size_t c5vrx2_wbfm_q4_phase5_reference(const uint8_t *input,
+                                       size_t input_bytes, uint8_t *output,
+                                       size_t output_bytes)
+{
+    if (!input || !output) return 0u;
+    const size_t pairs = input_bytes / 2u < output_bytes ?
+                         input_bytes / 2u : output_bytes;
+    const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
+    uint8_t previous = 0u;
+    for (size_t pair = 0u; pair < pairs; ++pair) {
+        const uint8_t current = q4_phase5(input[pair * 2u + 1u]);
+        int delta = (int)((current - previous) & 0x1fu);
+        if (delta >= 16) delta -= 32;
+        if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
+            delta = -delta;
+        int code = (int)cal->pedestal_code +
+                   scale_real_sum(delta * 8, cal->discriminator_gain);
+        if (code < 0) code = 0;
+        if (code > 63) code = 63;
+        output[pair] = (uint8_t)code;
+        previous = current;
+    }
+    return pairs;
+}
+
 const void *c5vrx2_wbfm_q4_program(void)
 {
     return c5vrx2_wbfm_q4_2to1_program;
@@ -456,6 +548,11 @@ const void *c5vrx2_wbfm_q4_lut3_program(void)
 const void *c5vrx2_wbfm_q4_iq5_program(void)
 {
     return c5vrx2_wbfm_q4_iq5_2to1_program;
+}
+
+const void *c5vrx2_wbfm_q4_phase5_program(void)
+{
+    return c5vrx2_wbfm_q4_phase5_2to1_program;
 }
 
 #if CONFIG_C5VRX2_WBFM_SELFTEST_ONCE

@@ -78,4 +78,13 @@ config C5VRX2_WBFM_SELFTEST_ONCE
         program through its hardware loopback, compare against the C reference,
         and persist input/actual/expected data in diagcap. RF is not started.
 
+config C5VRX2_WBFM_PHASE5_QUALITY
+    bool "Use uniform five-bit polar WBFM core"
+    depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_TX_WBFM_TEST
+    default y
+    help
+        Use a three-bundle dual-purpose LUT that maps the complete Q4/I4 byte
+        to uniform five-bit phase before FM differencing. Disable this to use
+        the physically proven two-bundle Q3/I2 Cartesian fallback.
+
 endmenu

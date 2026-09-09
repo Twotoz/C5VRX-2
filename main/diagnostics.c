@@ -132,7 +132,11 @@ static DRAM_ATTR uint8_t s_modem_parlio_capture[MODEM_PARLIO_BYTES]
 #define TX_WBFM_PACKED_BYTES (TX_WBFM_OUTPUT_BYTES / 2u)
 #define TX_WBFM_MAGIC        0x31584254u /* little-endian "TBX1" */
 #define TX_WBFM_VALID_GPIO   GPIO_NUM_23
-#define TX_WBFM_TEST_VARIANT 4 /* 1=rate, 2=4-bundle, 3=3-bundle, 4=IQ5/2 */
+#if CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
+#define TX_WBFM_TEST_VARIANT 5 /* uniform phase5, three bundles */
+#else
+#define TX_WBFM_TEST_VARIANT 4 /* physically proven Q3/I2 fallback */
+#endif
 #define TX_WBFM_CONSTANT_LUT_ORACLE 0
 BITSCRAMBLER_PROGRAM(c5vrx2_tx_2to1_probe_program,
                     "c5vrx2_tx_2to1_probe");
@@ -448,6 +452,10 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
         s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
         sizeof(s_tx_wbfm_expected));
 #endif
+#elif TX_WBFM_TEST_VARIANT == 5
+    expected_bytes = c5vrx2_wbfm_q4_phase5_reference(
+        s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
+        sizeof(s_tx_wbfm_expected));
 #else
     expected_bytes = c5vrx2_wbfm_q4_reference(
         s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
@@ -457,14 +465,18 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
     size_t loop_written = 0u;
     uint32_t loop_mismatches = UINT32_MAX;
     uint32_t loop_first_mismatch = UINT32_MAX;
-#if TX_WBFM_TEST_VARIANT == 3 || (TX_WBFM_TEST_VARIANT == 4 && !TX_WBFM_CONSTANT_LUT_ORACLE)
+#if TX_WBFM_TEST_VARIANT == 3 || \
+    (TX_WBFM_TEST_VARIANT == 4 && !TX_WBFM_CONSTANT_LUT_ORACLE) || \
+    TX_WBFM_TEST_VARIANT == 5
     bitscrambler_handle_t loop_bs = NULL;
     loop_error = bitscrambler_loopback_create(
         &loop_bs, SOC_BITSCRAMBLER_ATTACH_I2S0, TX_WBFM_INPUT_BYTES);
     if (loop_error == ESP_OK)
         loop_error = TX_WBFM_TEST_VARIANT == 3 ?
                      c5vrx2_wbfm_q4_configure_lut3(loop_bs) :
-                     c5vrx2_wbfm_q4_configure_iq5(loop_bs);
+                     (TX_WBFM_TEST_VARIANT == 5 ?
+                      c5vrx2_wbfm_q4_configure_phase5(loop_bs) :
+                      c5vrx2_wbfm_q4_configure_iq5(loop_bs));
     if (loop_error == ESP_OK)
         loop_error = bitscrambler_loopback_run(
             loop_bs, s_tx_wbfm_input, sizeof(s_tx_wbfm_input),
@@ -538,9 +550,11 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
      * no embedded LUT words and therefore preserves these entries. */
     setup_err = TX_WBFM_TEST_VARIANT == 3 ?
                 c5vrx2_wbfm_q4_configure_lut3(tx->bs_handle) :
+                (TX_WBFM_TEST_VARIANT == 5 ?
+                 c5vrx2_wbfm_q4_configure_phase5(tx->bs_handle) :
                 (TX_WBFM_TEST_VARIANT == 4 ?
                  c5vrx2_wbfm_q4_configure_iq5(tx->bs_handle) :
-                 c5vrx2_wbfm_q4_load_tx_lut());
+                 c5vrx2_wbfm_q4_load_tx_lut()));
     if (setup_err != ESP_OK) goto cleanup;
     if (TX_WBFM_TEST_VARIANT == 4)
         lut_pre_mismatches = c5vrx2_wbfm_q4_verify_tx_iq5_lut(
@@ -623,6 +637,8 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
             c5vrx2_wbfm_q4_lut3_program(),
 #elif TX_WBFM_TEST_VARIANT == 4
             c5vrx2_wbfm_q4_iq5_program(),
+#elif TX_WBFM_TEST_VARIANT == 5
+            c5vrx2_wbfm_q4_phase5_program(),
 #else
             c5vrx2_wbfm_q4_program(),
 #endif
@@ -687,7 +703,8 @@ persist:
         .version = TX_WBFM_TEST_VARIANT == 1 ? 3u :
                    (TX_WBFM_TEST_VARIANT == 2 ? 4u :
                    (TX_WBFM_TEST_VARIANT == 3 ? 5u :
-                    (TX_WBFM_TEST_VARIANT == 4 ? 6u : 2u))),
+                   (TX_WBFM_TEST_VARIANT == 4 ? 6u :
+                    (TX_WBFM_TEST_VARIANT == 5 ? 7u : 2u)))),
         .header_bytes = sizeof(tx_wbfm_header_t),
         .input_bytes = sizeof(s_tx_wbfm_input),
         .output_bytes = expected_bytes,

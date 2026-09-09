@@ -187,6 +187,13 @@ static esp_err_t prepare_tx(void)
     if (trace_step(20u, err) != ESP_OK) return err;
     err = parlio_tx_unit_decorate_bitscrambler(s_tx);
     if (trace_step(21u, err) != ESP_OK) return err;
+#if CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
+    /* The quality program has no embedded LUT. Load its dual-purpose table
+     * after the decorator owns the TX channel; transaction start loads only
+     * instructions and therefore leaves this LUT intact. */
+    err = c5vrx2_wbfm_q4_load_tx_phase5();
+    if (trace_step(23u, err) != ESP_OK) return err;
+#endif
     err = parlio_tx_unit_enable(s_tx);
     return trace_step(22u, err);
 }
@@ -212,7 +219,12 @@ static esp_err_t start_tx_ring(void)
     const c5vrx2_calibration_t *cal = c5vrx2_calibration_get();
     const parlio_transmit_config_t cfg = {
         .idle_value = cal->pedestal_code,
-        .bitscrambler_program = c5vrx2_wbfm_q4_iq5_program(),
+        .bitscrambler_program =
+#if CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
+            c5vrx2_wbfm_q4_phase5_program(),
+#else
+            c5vrx2_wbfm_q4_iq5_program(),
+#endif
         .flags.loop_transmission = true,
     };
     return parlio_tx_unit_transmit(s_tx, s_raw_ring,

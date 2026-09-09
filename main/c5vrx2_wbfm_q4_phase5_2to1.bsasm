@@ -1,0 +1,63 @@
+# Three-bundle quality WBFM core for 40 MS/s packed Q4/I4 input and
+# 20 MS/s six-bit CVBS output.
+#
+# LUT words are deliberately dual-purpose:
+#   LUT[raw_q4_i4].bits[12:8] = uniform five-bit polar phase
+#   LUT[(previous_phase << 5) | current_phase].bits[5:0] = DAC code
+#
+# This lets the complete eight-bit Cartesian input reach an atan2-derived
+# phase quantizer before the 32 x 32 discriminator lookup.  It avoids the
+# production fallback's asymmetric Q3/I2 Cartesian truncation while fitting
+# in the C5's 1024 x 16-bit LUT. O8..O12 retains phase across every pair/ring
+# boundary. The selected bytes are input 1,3,5,..., so the discriminator spans
+# two coherent 40-MS/s input intervals just like the proven two-bundle core.
+
+cfg prefetch true
+cfg eof_on upstream
+cfg trailing_bytes 9
+cfg lut_width_bits 16
+
+address_phase:
+    # Preserve previous phase and address LUT[second byte of this input pair].
+    set 8..12 O8..O12,
+    set 13..15 L,
+    set 16 8,
+    set 17 9,
+    set 18 10,
+    set 19 11,
+    set 20 12,
+    set 21 13,
+    set 22 14,
+    set 23 15,
+    set 24..25 L,
+    read 16
+
+address_delta:
+    # First lookup's high five bits are current phase. Retain them in
+    # O8..O12 and address LUT[(previous << 5) | current].
+    set 8 L8,
+    set 9 L9,
+    set 10 L10,
+    set 11 L11,
+    set 12 L12,
+    set 13..15 L,
+    set 16 L8,
+    set 17 L9,
+    set 18 L10,
+    set 19 L11,
+    set 20 L12,
+    set 21 O8,
+    set 22 O9,
+    set 23 O10,
+    set 24 O11,
+    set 25 O12,
+    set 26..31 L
+
+emit:
+    # Second lookup's low six bits are the complete calibrated DAC code.
+    set 0..5 L0..L5,
+    set 6..7 L,
+    set 8..12 O8..O12,
+    set 13..15 L,
+    write 8,
+    jmp address_phase
