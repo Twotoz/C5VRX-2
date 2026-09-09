@@ -1,0 +1,17 @@
+CONFIG_IDF_TARGET="esp32c5"
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# LP core owns the timing-sensitive RF dump rearm loop.
+CONFIG_ULP_COPROC_ENABLED=y
+CONFIG_ULP_COPROC_TYPE_LP_CORE=y
+CONFIG_ULP_COPROC_RESERVE_MEM=4096
+CONFIG_RTC_FAST_CLK_SRC_XTAL=y
+
+# Native XIAO USB remains useful for boot/fault logs, but is not in the RF path.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_PHY_ENABLE_CERT_TEST=y
+
+# HP is deliberately parked while MAC owns the fixed RF-dump SRAM window.
+# CONFIG_ESP_INT_WDT is not set
+# CONFIG_ESP_TASK_WDT_EN is not set
