@@ -1,74 +1,31 @@
-# C5VRX-2 agent context
+# C5VRX repository grounding
 
-This repository is a clean realtime reset of `Twotoz/C5VRX`, not an unrelated receiver project.
+`Twotoz/C5VRX` is the canonical project repository.
 
-## Historical source of truth
+- Current implementation: `/main`
+- Current hardware-proven findings: `/docs`
+- Historical experiments: `/legacy/c5vrx1`
+- Preserved archive discussions: `/docs/legacy-issues`
 
-Use the old repository as a hardware/reverse-engineering donor when needed:
+`legacy/c5vrx1` is reference material, not current production code. Always
+search it when investigating ESP32-C5 RF/PHY, MODEM_DIAG, IQ capture, analog
+video, WBFM, PARLIO, DAC hardware, receiver-console behavior, or an architecture
+that may already have been attempted.
 
-- repository: `https://github.com/Twotoz/C5VRX`
-- proven finite-capture baseline: commit `d17b2c56f1b6bb2973af5f96d60a6fa0e7b58837`
-- build label at that point: `video-proof-24-polarity-locked-hsync`
-- that baseline proved A1 / 5865 MHz mode-0 16K packed Q10/I10 captures and host-side video proof.
+When historical assumptions conflict with newer physical C5VRX evidence,
+current hardware findings in `/docs` take precedence. Do not reintroduce a
+rejected architecture before reading the corresponding current and legacy
+findings that explain its failure.
 
-Important: proof24 "live" IQ was host-chained finite `CAPTURE 16384` requests. It was not true chip-side continuous acquisition.
+## Current realtime invariants
 
-Later C5VRX work proved the fast one-shot rearm primitive and REGDMA/LP-core machinery. That is now diagnostic history: the current production direction uses the autonomous pre-trigger ring and does not periodically rearm.
-
-The current architecture contract is:
-
-```text
-A1 / 5865 MHz
--> mode-0 packed Q10/I10 writer
--> fixed 16K-word circular RF SRAM
--> adjacent-sample WBFM for every IQ sample
--> real-domain filter/rate conversion
--> continuous PARLIO loop GDMA
--> XIAO D4..D9 resistor DAC
-```
-
-VTX presence is never a prerequisite for IQ. VTX OFF still produces valid changing IQ and must not stop the producer.
-
-## Exact current XIAO ESP32-C5 AV hardware
-
-Use the **current physical resistor network below**, not the older near-ideal resistor values from C5VRX documentation.
-
-| XIAO pin | ESP32-C5 GPIO | Current series resistor to VIDEO node |
-|---|---:|---:|
-| D4 | GPIO23 | 8.2 kOhm |
-| D5 | GPIO24 | 3.9 kOhm |
-| D6 | GPIO11 | 2.0 kOhm |
-| D7 | GPIO12 | 1.0 kOhm |
-| D8 | GPIO8 | 470 Ohm |
-| D9 | GPIO9 | 240 Ohm |
-
-All six resistor outputs join at the same `VIDEO` node.
-
-- `VIDEO -> GND`: 200 Ohm
-- XIAO ground and FatShark/video ground must be common.
-- The goggles/monitor provide the normal 75 Ohm video termination.
-
-Older C5VRX calculations used approximately:
-
-- 7.87 kOhm
-- 3.92 kOhm
-- 1.96 kOhm
-- 976 Ohm
-- 487 Ohm
-- 243 Ohm
-- 191 Ohm shunt to ground
-
-Those are **not** the currently fitted values. Do not silently substitute them for the current 8.2k / 3.9k / 2k / 1k / 470R / 240R + 200R network.
-
-## Realtime rules
-
-- Do not gate IQ production on PAL/NTSC, sync, burst, RF power, VTX detection, or USB.
-- Do not repeat the complete vendor `adctrig()` lifecycle per 16K generation.
-- Do not treat the 16K physical wrap as a capture boundary or restart event.
-- Preserve adjacent-FM state across every normal span and SRAM wrap.
-- Never decimate complex IQ before FM; reduce rate only in the real domain.
-- Do not insert a full 64 KiB per-block memcpy in the hot path.
-- Keep USB/terminal out of the realtime datapath.
-- Keep USB scheduled for asynchronous telemetry; do not mask interrupts or park HP.
-- Do not change D4..D9 GPIO mapping or DAC resistor assumptions unless the physical hardware is explicitly changed.
-- Recognizable video is a later acceptance gate. First prove uninterrupted RF-dependent output across VTX OFF -> ON -> OFF.
+- VTX presence and USB must never gate or pace IQ production.
+- The normal live source is MODEM_DIAG Q4/I4 captured by PARLIO RX; active
+  MAC-owned dump SRAM is a diagnostic writer, not a readable live source.
+- Do not turn a physical SRAM or DMA block boundary into a DSP reset.
+- Do not claim sample-gapless RF or AV transport without its physical proof.
+- The normal live path recovers the transmitted composite waveform; it does not
+  decode pixels or regenerate PAL/NTSC.
+- Keep USB/debug outside realtime pacing.
+- Do not silently change the tested XIAO D4..D9 DAC pin order or the physical
+  8.2k/3.9k/2k/1k/470R/240R plus 200R network.

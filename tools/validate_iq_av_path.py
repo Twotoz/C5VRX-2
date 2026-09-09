@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host analysis for C5VRX-2 IQ captures and the resistor DAC.
+"""Host analysis for C5VRX IQ captures and the resistor DAC.
 
 The production source contract is checked against the direct two-bundle
 Q3/I2 discriminator. Historical Q10 captures remain useful for comparing
