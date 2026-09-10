@@ -85,12 +85,39 @@ static uint8_t q4_phase5(unsigned packed)
 
 enum {
     PHASE5_INVALID_STATE = 31u,
+    /* Confidence threshold in signed-nibble magnitude-squared units.
+     * Issue #6: q4_phase5() uses bucket-center coordinates internally, but
+     * the confidence/magnitude test here uses the same signed-nibble geometry
+     * as the MODEM hardware delivers. Both geometries identify the same
+     * physically-weak samples: a signed-nibble magnitude-squared below 5
+     * catches exactly the six packed bytes where both I and Q round to the
+     * zero nibble (I²+Q²: 0,1,1,2,2,4). Bucket-center amplitude for these
+     * same bytes is still small relative to any single-nibble vector
+     * (bc_mag2≈1984 vs ≈10112 for the next weakest). The two geometries
+     * agree on which samples are unreliable; only the numeric threshold
+     * differs. Using nibble geometry avoids floating-point in the hot path. */
     PHASE5_MIN_AMPLITUDE2 = 5u,
 };
 
+/* Signed nibble in -8..+7 range from a 4-bit packed code. */
 static int signed_q4(unsigned code)
 {
     return code >= 8u ? (int)code - 16 : (int)code;
+}
+
+/* Confidence of a single 40-MS/s sample pair for the FM discriminator.
+ * Returns the minimum signed-nibble magnitude-squared of the two IQ bytes
+ * that bracket this discriminator interval. A value below PHASE5_MIN_AMPLITUDE2
+ * means at least one sample is physically unreliable (near-origin, issue #6). */
+static unsigned q4_confidence(unsigned prev_packed, unsigned curr_packed)
+{
+    const int qp = signed_q4(prev_packed & 0x0fu);
+    const int ip = signed_q4((prev_packed >> 4u) & 0x0fu);
+    const int qc = signed_q4(curr_packed & 0x0fu);
+    const int ic = signed_q4((curr_packed >> 4u) & 0x0fu);
+    const unsigned mp = (unsigned)(ip * ip + qp * qp);
+    const unsigned mc = (unsigned)(ic * ic + qc * qc);
+    return mp < mc ? mp : mc;
 }
 
 static uint8_t q4_phase5_state(unsigned packed)
