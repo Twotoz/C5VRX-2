@@ -134,3 +134,38 @@ phase transitions must be addressed next.
 
 Set `CONFIG_C5VRX2_WBFM_PHASE5_QUALITY=n` to restore the known-working Q3/I2
 baseline while preserving the rest of the direct RX-ring-to-TX architecture.
+
+### Gain calibration — live findings (2026-09-10)
+
+First live test after the centroid/invalid-state commit confirmed:
+
+- image locks and displays recognisable video with colour;
+- gain=1 (effective 0.75×) is **too low**: sync tip only reaches ≈ code 1
+  instead of code 0, and the colour burst amplitude falls below the TV
+  chroma-detector threshold. The TV runs its colour decoder in free-running
+  mode and interprets high-frequency FM noise as colour → **coloured static**.
+- gain=2 (effective 1.5×) is the correct production default: sync tip
+  reaches code 0, colour burst is above the detection threshold, and the
+  image shows correct hues.
+- The general static (snow) is not improved by changing gain alone. It is
+  FM f²-noise — noise power proportional to frequency squared — concentrated
+  in the 3–5 MHz band that overlaps the chroma subcarrier. This manifests as
+  coloured snow independent of discriminator gain.
+
+### Remaining static — root cause
+
+FM f²-noise is inherent to every FM discriminator without de-emphasis. The
+standard fix is a de-emphasis filter matched to the transmitter's pre-emphasis
+curve (75 µs for broadcast, but most FPV VTXes transmit without pre-emphasis,
+so a plain low-pass at ≈ 4.5 MHz is the correct target).
+
+The current two-bundle BitScrambler pipeline has no spare instruction slot
+for a filter tap. Implementing a 2-tap boxcar or first-order IIR requires a
+**three-bundle redesign**:
+
+1. Lookup phase for pair n → store in O-register.
+2. Lookup phase for pair n+2 → compute delta and store raw code.
+3. Average with previous raw code → clamp → emit.
+
+This maintains 20 MS/s output and gives ≈ 6 dB high-frequency noise
+reduction. That is the next planned quality step.
