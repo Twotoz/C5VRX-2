@@ -794,3 +794,17 @@ unsigned c5vrx2_wbfm_q4_selftest_once(void)
     return header.result_code;
 }
 #endif
+
+BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_q4_trajectory_2to1_program,
+                    "c5vrx2_wbfm_q4_trajectory_2to1");
+
+esp_err_t c5vrx2_wbfm_q4_configure_trajectory(bitscrambler_handle_t handle)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    return bitscrambler_load_program(handle, c5vrx2_wbfm_q4_trajectory_2to1_program);
+}
+
+const void *c5vrx2_wbfm_q4_trajectory_program(void)
+{
+    return c5vrx2_wbfm_q4_trajectory_2to1_program;
+}
