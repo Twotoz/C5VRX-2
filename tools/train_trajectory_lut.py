@@ -96,6 +96,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--train', type=Path, nargs='+', default=[])
     ap.add_argument('--validate', type=Path, nargs='+', default=[])
+    ap.add_argument('--min-count', type=int, default=2)
     ap.add_argument('--write', action='store_true')
     args = ap.parse_args()
     hashes = lambda paths: {hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
@@ -106,7 +107,7 @@ def main():
     stats = accumulate(prior_groups())
     dac, trusted = select(stats)
     if args.train:
-        dac, trusted = select(accumulate(capture_groups(args.train)), dac)
+        dac, trusted = select(accumulate(capture_groups(args.train)), dac, min_count=args.min_count)
     report = {'source': 'captures' if args.train else 'exhaustive uniform geometry prior',
               'trusted_addresses': int(trusted.sum()), 'dac_levels': int(len(np.unique(dac))),
               'train_sha256': sorted(hashes(args.train)), 'validation': []}
