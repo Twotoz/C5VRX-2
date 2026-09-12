@@ -27,9 +27,9 @@
 
 #define MODEM_IQ_RATE_HZ 40000000u
 #define CVBS_RATE_HZ     20000000u
-#define RAW_BLOCK_BYTES      4096u
-#define RAW_RING_BLOCKS         4u
-#define RAW_RING_BYTES (RAW_BLOCK_BYTES * RAW_RING_BLOCKS)
+#define RAW_DMA_NODE_BYTES   4092u
+#define RAW_RING_NODES          4u
+#define RAW_RING_BYTES (RAW_DMA_NODE_BYTES * RAW_RING_NODES)
 
 #define DUMP_CTRL       0x600a9004u
 #define DUMP_PTR_MODE   0x600a9008u
@@ -51,8 +51,18 @@ static const uint8_t s_iq_diag[8] = {6u, 7u, 8u, 9u, 16u, 17u, 18u, 19u};
  * 40 MB/s and its BitScrambler emits one 6-bit CVBS sample per two input
  * bytes. Both units derive 40:20 MHz from PLL_F240M. Starting TX one block
  * behind RX keeps producer and consumer away from the same bytes without a
- * CPU copy or a second CVBS ring. */
+ * CPU copy or a second CVBS ring.
+ *
+ * ESP-IDF 6.0.1 limits an aligned C5 PARLIO-RX GDMA descriptor to 4092
+ * bytes, not 4096. Making the ring exactly four of those nodes prevents the
+ * driver from turning the tail into two unequal descriptors. Unequal RX/TX
+ * descriptor cadence is a plausible source of the observed per-line
+ * horizontal timing steps, so the transport geometry is explicit here. */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_raw_ring[RAW_RING_BYTES];
+_Static_assert((RAW_RING_BYTES % RAW_DMA_NODE_BYTES) == 0u,
+               "raw ring must contain whole C5 RX GDMA nodes");
+_Static_assert((RAW_DMA_NODE_BYTES & 3u) == 0u,
+               "C5 RX GDMA nodes must remain word aligned");
 #if CONFIG_C5VRX2_LIVE_SNAPSHOT_ONCE
 static DRAM_ATTR __attribute__((aligned(16))) uint8_t
     s_raw_snapshot[RAW_RING_BYTES];
@@ -356,11 +366,14 @@ esp_err_t c5vrx2_realtime_start(void)
     if ((err = start_rx_ring()) != ESP_OK) return err;
 #endif
 
-    /* RX and the TX-BS consume raw bytes at the same 40 MB/s. Start TX one
-     * complete 4096-byte block behind RX. Their 40:20 clocks share PLL_F240M,
-     * so that separation cannot drift in normal operation. */
+    /* RX and the TX-BS consume raw bytes at the same 40 MB/s. Start TX at
+     * least one complete 4092-byte RX descriptor behind RX. Round the delay
+     * upward: truncating it would start the reader inside the descriptor that
+     * GDMA is still filling. Their 40:20 clocks share PLL_F240M, so that
+     * separation cannot drift in normal operation. */
     #if !CONFIG_C5VRX2_LIVE_SNAPSHOT_RAW_Q4
-    esp_rom_delay_us(RAW_BLOCK_BYTES * 1000000u / MODEM_IQ_RATE_HZ);
+    esp_rom_delay_us((RAW_DMA_NODE_BYTES * 1000000u + MODEM_IQ_RATE_HZ - 1u) /
+                     MODEM_IQ_RATE_HZ);
     if ((err = start_tx_ring()) != ESP_OK) return err;
     #endif
 

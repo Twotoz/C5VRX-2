@@ -108,6 +108,10 @@ def verify_sources() -> None:
     assert "c5vrx2_wifi5_lock_rx_only()" in source
     assert "#define MODEM_IQ_RATE_HZ 40000000u" in realtime
     assert "#define CVBS_RATE_HZ     20000000u" in realtime
+    assert "#define RAW_DMA_NODE_BYTES   4092u" in realtime
+    assert "RAW_RING_BYTES (RAW_DMA_NODE_BYTES * RAW_RING_NODES)" in realtime
+    assert "RAW_DMA_NODE_BYTES * 1000000u + MODEM_IQ_RATE_HZ - 1u" in realtime
+    assert "RAW_BLOCK_BYTES" not in realtime
     assert ".partial_rx_en = true" in realtime
     assert ".flags.loop_transmission = true" in realtime
     assert "parlio_tx_unit_decorate_bitscrambler" in realtime

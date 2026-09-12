@@ -33,6 +33,7 @@ Modern C5VRX
 | Current image-quality path and proof gates | [image-quality.md](image-quality.md) |
 | Corrected issue #6 winding/static measurements | [issue-6-static-analysis.md](issue-6-static-analysis.md) |
 | Static root causes, digital filtering limits, analog capacitor de-emphasis | [static-reduction-and-filtering.md](static-reduction-and-filtering.md) |
+| Horizontal line jitter and physical PARLIO/GDMA node geometry | [horizontal-line-jitter.md](horizontal-line-jitter.md) |
 | Wiring and remaining physical tests | [hardware-test.md](hardware-test.md) |
 | Accepted historical donor primitives | [proven-donors.md](proven-donors.md) |
 | Licensing and contributor evidence | [licensing.md](licensing.md) |

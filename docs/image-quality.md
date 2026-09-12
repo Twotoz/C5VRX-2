@@ -109,10 +109,12 @@ The first VTX-on capture on 2026-09-09 established:
   amplitude-squared >= 64 it fell to 0.12--0.50%;
 - the current gain/clamp table emits only 13 distinct DAC codes:
   `0, 2, 8, 14, 20, 26, 32, 38, 44, 50, 56, 62, 63`;
-- the three observed 4096-byte internal block crossings had deltas
-  `[7, 0, -10]` for even parity and `[1, -10, 0]` for odd parity. This one
-  bounded capture contains no uniquely saturated internal block crossing,
-  but it does not yet prove long-running simultaneous RX/TX boundary safety.
+- the original analysis checked assumed 4096-byte software boundaries. IDF
+  6.0.1 actually limits C5 PARLIO-RX GDMA nodes to 4092 bytes. The production
+  ring now consists of four equal 4092-byte RX nodes rather than a 16384-byte
+  buffer that the driver divided into unequal tail nodes. This removes one
+  transport asymmetry, but a live A/B is still required before claiming that
+  descriptor transitions caused all visible horizontal jitter.
 
 Therefore the remaining static is not primarily explained by carrier/DC
 offset. The strongest measured issue is ambiguity/noise in the two-interval

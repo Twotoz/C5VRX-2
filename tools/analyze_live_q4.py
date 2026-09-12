@@ -23,7 +23,10 @@ SEL_RATE_HZ = RAW_RATE_HZ / 2.0
 NTSC_SC_HZ = 3_579_545.0
 PAL_SC_HZ = 4_433_618.75
 NTSC_LINE_HZ = 15_734.264
-RAW_BLOCK = 4096
+# ESP-IDF 6.0.1's C5 PARLIO-RX driver uses the largest 4-byte-aligned GDMA
+# payload (4092 bytes). 4096 was only the original software block assumption
+# and does not identify a physical descriptor boundary.
+RAW_BLOCK = 4092
 INVALID_STATE = 31
 MIN_AMP2 = 5
 
