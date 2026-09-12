@@ -110,5 +110,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: issue12-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }}
-          path: issue12-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }}.bin
+          path: build-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }}/issue12-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }}.bin
           if-no-files-found: error
