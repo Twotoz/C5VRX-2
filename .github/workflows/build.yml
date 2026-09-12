@@ -42,10 +42,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install numpy
+      - run: pip install numpy matplotlib
       - run: python tools/validate_trajectory.py
       - run: python tools/validate_phase5_quality.py
       - run: python tools/validate_continuous_pipeline.py
+      - run: python tools/test_issue11_output.py
 
   trajectory-build:
     runs-on: ubuntu-latest

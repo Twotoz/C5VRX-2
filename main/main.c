@@ -13,6 +13,11 @@
 #include "startup_trace.h"
 #include "wbfm_q4.h"
 
+#if CONFIG_C5VRX2_ISSUE11_CAPTURE
+#include <stdio.h>
+esp_err_t c5vrx2_issue11_capture(void);
+#endif
+
 static const char *TAG = "c5vrx2";
 
 #define XIAO_USER_LED GPIO_NUM_27
@@ -151,7 +156,26 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(1000));
     c5vrx2_trace_stage(3u, ESP_OK);
 
-#if CONFIG_C5VRX2_MODE_RF_ORACLE
+#if CONFIG_C5VRX2_ISSUE11_CAPTURE
+    ESP_LOGW(TAG, "ISSUE11 READY: countdown 3 seconds before capture...");
+    for (int i = 0; i < 3; ++i) {
+        gpio_set_level(XIAO_USER_LED, 0); /* LED on */
+        vTaskDelay(pdMS_TO_TICKS(200));
+        gpio_set_level(XIAO_USER_LED, 1); /* LED off */
+        vTaskDelay(pdMS_TO_TICKS(800));
+    }
+    gpio_set_level(XIAO_USER_LED, 0); /* LED on during capture */
+    err = c5vrx2_issue11_capture();
+    gpio_set_level(XIAO_USER_LED, 1); /* LED off */
+    for (int i = 0; i < 10; ++i) {
+        gpio_set_level(XIAO_USER_LED, 0);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level(XIAO_USER_LED, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(TAG, "ISSUE11 CAPTURE COMPLETE (err=%s). VTX can be turned off now.", esp_err_to_name(err));
+    for (;;) vTaskDelay(portMAX_DELAY);
+#elif CONFIG_C5VRX2_MODE_RF_ORACLE
     err = c5vrx2_rf_oracle_diagnostic_start();
 #elif CONFIG_C5VRX2_MODE_RF_WRAP
     err = c5vrx2_rf_wrap_diagnostic_run();

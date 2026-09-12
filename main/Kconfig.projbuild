@@ -50,6 +50,11 @@ config C5VRX2_AV_STATIC_CODE
     range 0 63
     default 18
 
+config C5VRX2_ISSUE11_CAPTURE
+    bool "Issue 11 bounded RF acquisition and actual PR10 DAC replay capture"
+    depends on C5VRX2_MODE_LIVE
+    default n
+
 config C5VRX2_LIVE_SNAPSHOT_ONCE
     bool "Persist one live raw Q4/I4 ring for offline diagnosis"
     depends on C5VRX2_MODE_LIVE
