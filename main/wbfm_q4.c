@@ -83,36 +83,21 @@ static uint8_t q4_phase5(unsigned packed)
     return (uint8_t)phase5 & 0x1fu;
 }
 
-enum {
-    PHASE5_INVALID_STATE = 31u,
-    PHASE5_MIN_AMPLITUDE2 = 5u,
-};
-
-static int signed_q4(unsigned code)
-{
-    return code >= 8u ? (int)code - 16 : (int)code;
-}
-
 static uint8_t q4_phase5_state(unsigned packed)
 {
-    const int q = signed_q4(packed & 0x0fu);
-    const int i = signed_q4((packed >> 4u) & 0x0fu);
-    if ((unsigned)(i * i + q * q) < PHASE5_MIN_AMPLITUDE2)
-        return PHASE5_INVALID_STATE;
-
-    /* Reserve state 31 for an unreliable near-origin vector. Merge the
-     * adjacent -11.25-degree phase bin into the zero-degree cluster. */
-    const uint8_t phase = q4_phase5(packed);
-    return phase == 31u ? 0u : phase;
+    /* Keep all 32 circular phase states. Reusing state 31 as a confidence
+     * flag aliases a valid phase sector and turns legitimate samples into
+     * pedestal specks. Confidence repair needs separate temporal state. */
+    return q4_phase5(packed);
 }
 
-/* Circular means of the reliable Q4/I4 vectors assigned to states 0..30,
- * expressed on the signed phase8 circle. State 31 is the invalid marker. */
-static const int8_t s_phase5_centroid_phase8[31] = {
-      -4,    8,   15,   24,   32,   40,   49,   56,
-      64,   72,   80,   87,   96,  104,  113,  120,
+/* Circular means of the Q4/I4 vectors assigned to all 32 phase states,
+ * expressed on the signed phase8 circle. */
+static const int8_t s_phase5_centroid_phase8[32] = {
+       0,    8,   15,   24,   32,   40,   49,   56,
+      64,   72,   79,   87,   96,  104,  113,  120,
     -128, -120, -113, -104,  -96,  -88,  -79,  -72,
-     -64,  -56,  -49,  -40,  -32,  -23,  -16,
+     -64,  -56,  -49,  -40,  -32,  -23,  -15,   -8,
 };
 
 static int phase5_delta_phase8(unsigned previous, unsigned current)
@@ -517,14 +502,11 @@ size_t c5vrx2_wbfm_q4_phase5_reference(const uint8_t *input,
     uint8_t previous = 0u;
     for (size_t pair = 0u; pair < pairs; ++pair) {
         const uint8_t current = q4_phase5_state(input[pair * 2u + 1u]);
-        int code = (int)cal->pedestal_code;
-        if (previous != PHASE5_INVALID_STATE &&
-            current != PHASE5_INVALID_STATE) {
-            int delta = phase5_delta_phase8(previous, current);
-            if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
-                delta = -delta;
-            code += scale_real_sum(delta, cal->discriminator_gain);
-        }
+        int delta = phase5_delta_phase8(previous, current);
+        if (cal->polarity == C5VRX2_POLARITY_PREVIOUS_MINUS_CURRENT)
+            delta = -delta;
+        int code = (int)cal->pedestal_code +
+                   scale_real_sum(delta, cal->discriminator_gain);
         if (code < 0) code = 0;
         if (code > 63) code = 63;
         output[pair] = (uint8_t)code;

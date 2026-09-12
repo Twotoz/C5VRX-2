@@ -145,7 +145,11 @@ static esp_err_t prepare_rx(void)
     if (trace_step(11u, err) != ESP_OK) return err;
 
     const parlio_rx_soft_delimiter_config_t delimiter_cfg = {
+#if CONFIG_C5VRX2_PARLIO_RX_NEG_EDGE
+        .sample_edge = PARLIO_SAMPLE_EDGE_NEG,
+#else
         .sample_edge = PARLIO_SAMPLE_EDGE_POS,
+#endif
         .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
         /* IDF requires a non-zero soft-delimiter length even for an
          * infinite (partial_rx_en) transaction. In infinite mode this only

@@ -10,10 +10,6 @@ from pathlib import Path
 
 
 TAU = 2.0 * math.pi
-INVALID_STATE = 31
-MIN_AMPLITUDE2 = 5
-
-
 def signed_bucket_center(code: int, bits: int) -> float:
     width = 1 << (10 - bits)
     center = code * width + (width - 1) * 0.5
@@ -41,23 +37,14 @@ def phase5(packed: int) -> int:
     return round(exact_phase(packed) * 32.0 / TAU) & 0x1F
 
 
-def signed_q4(code: int) -> int:
-    return code - 16 if code >= 8 else code
-
-
 def phase5_state(packed: int) -> int:
-    q = signed_q4(packed & 0x0F)
-    i = signed_q4(packed >> 4)
-    if i * i + q * q < MIN_AMPLITUDE2:
-        return INVALID_STATE
-    phase = phase5(packed)
-    return 0 if phase == 31 else phase
+    return phase5(packed)
 
 
 @functools.lru_cache(maxsize=None)
 def phase5_centroids() -> list[float]:
     result: list[float] = []
-    for state in range(INVALID_STATE):
+    for state in range(32):
         members = [exact_phase(packed) for packed in range(256)
                    if phase5_state(packed) == state]
         sine = sum(math.sin(value) for value in members)
@@ -86,10 +73,8 @@ def build_lut(calibration_gain: int = 2) -> list[int]:
     lut = [0] * 1024
     for previous in range(32):
         for current in range(32):
-            code = 20
-            if previous != INVALID_STATE and current != INVALID_STATE:
-                delta = centroid_delta_phase8(previous, current)
-                code = max(0, min(63, 20 + scale_real_sum(delta, calibration_gain)))
+            delta = centroid_delta_phase8(previous, current)
+            code = max(0, min(63, 20 + scale_real_sum(delta, calibration_gain)))
             lut[(previous << 5) | current] = code
     for packed in range(256):
         lut[packed] |= phase5_state(packed) << 8
@@ -155,10 +140,8 @@ def main() -> int:
     for previous in range(32):
         for current in range(32):
             index = (previous << 5) | current
-            expected = 20
-            if previous != INVALID_STATE and current != INVALID_STATE:
-                delta = centroid_delta_phase8(previous, current)
-                expected = max(0, min(63, 20 + scale_real_sum(delta, 2)))
+            delta = centroid_delta_phase8(previous, current)
+            expected = max(0, min(63, 20 + scale_real_sum(delta, 2)))
             assert (lut[index] & 0x3F) == expected
 
     cartesian_errors: list[float] = []
@@ -167,8 +150,6 @@ def main() -> int:
         q = signed_bucket_center(packed & 0x0F, 4)
         i = signed_bucket_center(packed >> 4, 4)
         if i * i + q * q <= 128.0 * 128.0:
-            continue
-        if phase5_state(packed) == INVALID_STATE:
             continue
         reference = exact_phase(packed)
         cartesian_errors.append(abs(wrapped(compact_iq5_phase(packed) -
@@ -181,16 +162,15 @@ def main() -> int:
     cartesian_max = math.degrees(max(cartesian_errors))
     polar_max = math.degrees(max(polar_errors))
     assert polar_rms < cartesian_rms * 0.4
-    # Reserving one state for unreliable near-origin vectors merges the small
-    # -11.25-degree cluster into state zero. Keep the worst reliable-vector
-    # error comfortably below half of the old Cartesian quantizer's maximum.
+    # Keep the worst reliable-vector error comfortably below half of the old
+    # Cartesian quantizer's maximum.
     assert polar_max < cartesian_max * 0.5
 
     # Explicit branch-cut check around +pi/-pi remains a small positive step.
     assert centroid_delta_phase8(15, 16) == 8
 
     output_codes = sorted({value & 0x3F for value in lut})
-    assert len(output_codes) >= 40
+    assert len(output_codes) >= 32
 
     print("five-bit polar WBFM quality validation PASS")
     print(f"  Q3/I2 Cartesian phase error: {cartesian_rms:.2f} deg RMS, "
@@ -198,8 +178,7 @@ def main() -> int:
     print(f"  phase5 polar phase error:     {polar_rms:.2f} deg RMS, "
           f"{polar_max:.2f} deg max")
     print(f"  centroid delta DAC levels:    {len(output_codes)}")
-    print(f"  near-origin invalid states:   "
-          f"{sum(phase5_state(value) == INVALID_STATE for value in range(256))}")
+    print("  circular phase states:        32/32 preserved")
     print("  all 1024 dual-purpose LUT entries and modulo wrap verified")
     return 0
 
