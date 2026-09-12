@@ -177,6 +177,22 @@ def main():
     inv_mask = all_st == INVALID_STATE
     print(f"\nInvalid-state (PR5): {np.mean(inv_mask):.3%} of all samples")
 
+    sec("Winding loss at the actual 40 -> 20 MS/s boundary")
+    ph40 = phase_exact(raw)
+    adj40 = wrap_rad(np.diff(ph40))
+    starts40 = np.arange(0, len(raw) - 2, 2)
+    pair_sum40 = adj40[starts40] + adj40[starts40 + 1]
+    endpoint40 = wrap_rad(ph40[starts40 + 2] - ph40[starts40])
+    winding40 = np.abs(pair_sum40 - endpoint40) > math.pi / 2
+    q40, i40 = unpack_qi(raw)
+    m240 = q40**2 + i40**2
+    pm240 = np.minimum.reduce((m240[starts40], m240[starts40 + 1],
+                               m240[starts40 + 2]))
+    strong40 = pm240 >= (8 * 64)**2
+    print(f"  n->n+2 winding loss all:       {np.mean(winding40):.3%}")
+    if np.any(strong40):
+        print(f"  n->n+2 winding loss strong IQ: {np.mean(winding40[strong40]):.3%}")
+
     for parity in (0, 1):
         sel = raw[parity::2]
         print(f"\n{'='*60}")
@@ -200,21 +216,6 @@ def main():
             p999 = float(np.percentile(np.abs(d), 99.9))
             print(f"  {name}:")
             print(f"    DC offset: {off_hz:+.0f} Hz  rms={rms:.4f}  p99={p99:.4f}  p99.9={p999:.4f}")
-
-        sec("Winding-loss / n->n+2 endpoint ambiguity")
-        ph = phase_exact(sel)
-        adj = wrap_rad(np.diff(ph))
-        starts = np.arange(0, len(sel) - 2, 2)
-        pair_sum = wrap_rad(adj[starts] + adj[starts + 1])
-        endpoint = wrap_rad(ph[starts + 2] - ph[starts])
-        winding = np.abs(pair_sum - endpoint) > math.pi / 2
-        q_s, i_s = unpack_qi(sel)
-        m2 = q_s**2 + i_s**2
-        pm2 = np.minimum.reduce((m2[starts], m2[starts+1], m2[starts+2]))
-        strong = pm2 >= (8 * 64)**2
-        print(f"  winding loss all:          {np.mean(winding):.3%}")
-        if np.any(strong):
-            print(f"  winding loss (strong IQ):  {np.mean(winding[strong]):.3%}")
 
         sec("PR5 confidence / invalid-state analysis")
         st = phase5_state(sel)

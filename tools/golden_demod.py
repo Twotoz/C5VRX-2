@@ -27,16 +27,13 @@ NTSC_SC_HZ   = 3_579_545.0
 PAL_SC_HZ    = 4_433_618.75
 PEDESTAL     = 20
 GAIN         = 2   # calibration_gain matching firmware default
-INVALID      = 31
-MIN_AMP2     = 5   # nibble-coordinate threshold (firmware definition)
-
 # Centroid table from wbfm_q4.c
 _CENT = np.array([
-      -4,    8,   15,   24,   32,   40,   49,   56,
-      64,   72,   80,   87,   96,  104,  113,  120,
+       0,    8,   15,   24,   32,   40,   49,   56,
+      64,   72,   79,   87,   96,  104,  113,  120,
     -128, -120, -113, -104,  -96,  -88,  -79,  -72,
-     -64,  -56,  -49,  -40,  -32,  -23,  -16,
-], dtype=np.int32)   # 31 entries; state 31 has no centroid
+     -64,  -56,  -49,  -40,  -32,  -23,  -15,   -8,
+], dtype=np.int32)
 
 # ---------------------------------------------------------------------------
 # Core geometry (wbfm_q4.c production)
@@ -66,16 +63,7 @@ def phase5_prod(raw: np.ndarray) -> np.ndarray:
 
 
 def phase5_state(raw: np.ndarray) -> np.ndarray:
-    q_s = np.where((raw & 0xF) >= 8,
-                   (raw & 0xF).astype(np.int16) - 16,
-                   (raw & 0xF).astype(np.int16))
-    i_s = np.where((raw >> 4) >= 8,
-                   (raw >> 4).astype(np.int16) - 16,
-                   (raw >> 4).astype(np.int16))
-    mag2 = (i_s * i_s + q_s * q_s).astype(np.int32)
-    st = phase5_prod(raw).astype(np.int32)
-    st = np.where(st == 31, 0, st)
-    return np.where(mag2 < MIN_AMP2, INVALID, st).astype(np.int8)
+    return phase5_prod(raw)
 
 
 def wrap5(d: np.ndarray) -> np.ndarray:
@@ -98,17 +86,14 @@ def scale(d: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def demod_production(raw: np.ndarray) -> np.ndarray:
-    """Current firmware: n->n+2 on odd bytes, centroid mapping, invalid gate."""
+    """Current firmware: n->n+2 on odd bytes with all 32 phase states."""
     sel = raw[1::2]           # bytes 1,3,5,... (production parity)
     st = phase5_state(sel)
     p, c = st[:-1], st[1:]
-    valid = (p != INVALID) & (c != INVALID)
-    # centroid delta
-    d = ((_CENT[c.clip(0, 30).astype(np.int32)]
-          - _CENT[p.clip(0, 30).astype(np.int32)] + 128) % 256 - 128
+    d = ((_CENT[c.astype(np.int32)]
+          - _CENT[p.astype(np.int32)] + 128) % 256 - 128
          ).astype(np.int32)
-    d_raw = np.where(valid, d, 0).astype(np.int32)
-    return scale(d_raw)
+    return scale(d)
 
 
 def demod_adjacent(raw: np.ndarray,
@@ -129,8 +114,9 @@ def demod_adjacent(raw: np.ndarray,
     n_pairs = len(d40) // 2
     d20 = d40[:n_pairs * 2].reshape(n_pairs, 2).sum(axis=1)  # radians @ 20MS/s
 
-    # convert to phase5 steps for gain/pedestal mapping
-    d20_steps = d20 * 32.0 / TAU       # now in phase5-step units
+    # scale() consumes phase8 units, matching wbfm_q4.c.  The old model used
+    # phase5 units here and understated the adjacent result by a factor of 8.
+    d20_steps = d20 * 256.0 / TAU
     d20_int = np.clip(np.round(d20_steps), -128, 127).astype(np.int32)
     return scale(d20_int)
 
@@ -236,7 +222,9 @@ def main() -> None:
     phi = exact_phase(raw)
     adj = wrap_r(np.diff(phi))
     starts = np.arange(0, len(raw) - 2, 2)
-    pair_sum = wrap_r(adj[starts] + adj[starts + 1])
+    # Preserve the unwrapped adjacent sum: its +/-2pi branch is exactly the
+    # information that an endpoint-only n->n+2 discriminator loses.
+    pair_sum = adj[starts] + adj[starts + 1]
     endpoint = wrap_r(phi[starts + 2] - phi[starts])
     winding  = np.abs(pair_sum - endpoint) > math.pi / 2
     q_bc, i_bc = unpack(raw)
