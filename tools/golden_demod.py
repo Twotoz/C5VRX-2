@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Golden offline FM demodulator for issue #6.
 
 Compares three demodulation strategies on the same frozen Q4/I4 capture:
@@ -25,7 +25,7 @@ RAW_RATE_HZ  = 40_000_000.0
 OUT_RATE_HZ  = 20_000_000.0
 NTSC_SC_HZ   = 3_579_545.0
 PAL_SC_HZ    = 4_433_618.75
-PEDESTAL     = 20
+PEDESTAL     = 28
 GAIN         = 2   # calibration_gain matching firmware default
 # Centroid table from wbfm_q4.c
 _CENT = np.array([
