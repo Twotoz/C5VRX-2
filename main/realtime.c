@@ -22,6 +22,7 @@
 
 #include "calibration.h"
 #include "continuous_iq.h"
+#include "rx_clock.h"
 #include "startup_trace.h"
 #include "wbfm_q4.h"
 
@@ -125,10 +126,17 @@ static esp_err_t prepare_rx(void)
         .max_recv_size = sizeof(s_raw_ring),
         .dma_burst_size = 32u,
         .data_width = 8u,
-        .clk_src = PARLIO_CLK_SRC_DEFAULT,
-        .ext_clk_freq_hz = 0u,
+        .clk_src =
+#if CONFIG_C5VRX2_PARLIO_RX_CLOCK_INTERNAL
+            PARLIO_CLK_SRC_DEFAULT,
+#else
+            PARLIO_CLK_SRC_EXTERNAL,
+#endif
+        .ext_clk_freq_hz = c5vrx2_rx_clock_is_external() ?
+                           C5VRX2_RX_CLOCK_HZ : 0u,
         .exp_clk_freq_hz = MODEM_IQ_RATE_HZ,
-        .clk_in_gpio_num = -1,
+        .clk_in_gpio_num = c5vrx2_rx_clock_is_external() ?
+                           C5VRX2_RX_CLOCK_GPIO : -1,
         .clk_out_gpio_num = -1,
         .valid_gpio_num = -1,
         .data_gpio_nums = {
@@ -247,9 +255,11 @@ static void telemetry_task(void *argument)
          * SRAM bandwidth or become part of realtime pacing. */
         ESP_LOGI(TAG,
                  "LIVE raw_in=40M tx_bs_out=20M ptr=%u enable=%u done=%u "
-                 "stalls=%u starts=1 rearms=0",
+                 "stalls=%u starts=1 rearms=0 rx_clock=%s diag=%u",
                  (unsigned)current, (control & CTRL_ENABLE) != 0u,
-                 (control & CTRL_DONE) != 0u, (unsigned)stalls);
+                 (control & CTRL_DONE) != 0u, (unsigned)stalls,
+                 c5vrx2_rx_clock_name(),
+                 (unsigned)c5vrx2_rx_clock_diag_signal());
     }
 }
 
@@ -339,6 +349,8 @@ esp_err_t c5vrx2_realtime_start(void)
 
     esp_err_t err = route_modem_iq();
     if (trace_step(10u, err) != ESP_OK) return err;
+    err = c5vrx2_rx_clock_start();
+    if (trace_step(9u, err) != ESP_OK) return err;
     if ((err = prepare_rx()) != ESP_OK) return err;
 #if !CONFIG_C5VRX2_LIVE_SNAPSHOT_RAW_Q4
     if ((err = prepare_tx()) != ESP_OK) return err;
@@ -387,10 +399,11 @@ esp_err_t c5vrx2_realtime_start(void)
     ESP_LOGW(TAG,
              "LIVE ACTIVE: MODEM 80M -> coherent /2 Q4/I4 40M -> direct "
              "two-sample WBFM LUT -> CVBS 20M -> 6-bit DAC; measured_rf=%u "
-             "pedestal=%u gain=%u polarity=%u",
+             "pedestal=%u gain=%u polarity=%u rx_clock=%s diag=%u",
              (unsigned)continuous_iq_sample_rate_hz(),
              cal->pedestal_code, cal->discriminator_gain,
-             (unsigned)cal->polarity);
+             (unsigned)cal->polarity, c5vrx2_rx_clock_name(),
+             (unsigned)c5vrx2_rx_clock_diag_signal());
 #endif
     return ESP_OK;
 }

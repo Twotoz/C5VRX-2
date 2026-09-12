@@ -37,6 +37,7 @@
 #include "continuous_iq.h"
 #include "calibration.h"
 #include "rf_dump.h"
+#include "rx_clock.h"
 #include "startup_trace.h"
 #include "wifi5.h"
 #include "wbfm_q4.h"
@@ -67,9 +68,9 @@
 #define MODEM_DIAG_CONFIGS               4u
 #define MODEM_CAPTURE_WORDS            4096u
 #define MODEM_CAPTURE_LANES                8u
-#define MODEM_PARLIO_BYTES             8192u
+#define MODEM_PARLIO_BYTES            32768u
 #define MODEM_PARLIO_SAMPLE_RATE_HZ   40000000u
-#define MODEM_PARLIO_CAPTURE_US          350u
+#define MODEM_PARLIO_CAPTURE_US         1200u
 #define MODEM_PARLIO_CLOCK_GPIO       GPIO_NUM_2
 #define MODEM_CAPTURE_MAGIC       0x5043444du
 #define MODEM_CAPTURE_SUBTYPE ((esp_partition_subtype_t)0x42)
@@ -1546,10 +1547,8 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
                                              s_modem_capture_signals[lane],
                                          false, false);
     }
-    /* Use the same PLL-derived internal 40-MHz RX clock as production. The
-     * earlier 80/160-MHz external-clock probes established that C5 PARLIO RX
-     * still accepts about 40 MS/s; an unused faster clock only complicates
-     * this bounded byte-for-byte IQ proof. */
+    err = c5vrx2_rx_clock_start();
+    if (err != ESP_OK) goto cleanup_pins_only;
     __asm__ __volatile__("fence iorw, iorw" ::: "memory");
     uint32_t clock_transitions = 0u;
     uint32_t previous_clock =
@@ -1569,7 +1568,14 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
 
     modem_capture_header_t prearm = {
         .magic = MODEM_CAPTURE_MAGIC,
-        .version = 10u,
+        .version =
+#if CONFIG_C5VRX2_PARLIO_RX_CLOCK_MODEM_DEBUG40
+            14u,
+#elif CONFIG_C5VRX2_PARLIO_RX_CLOCK_PLL_F40
+            13u,
+#else
+            12u,
+#endif
         .header_bytes = sizeof(modem_capture_header_t),
         .raw_words = MODEM_PARLIO_BYTES,
         .ring_words = C5VRX2_RF_WORDS,
@@ -1608,10 +1614,17 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
          * granularity only and does not reduce the 80 MHz sample clock. */
         .dma_burst_size = 32u,
         .data_width = MODEM_CAPTURE_LANES,
-        .clk_src = PARLIO_CLK_SRC_DEFAULT,
-        .ext_clk_freq_hz = 0u,
+        .clk_src =
+#if CONFIG_C5VRX2_PARLIO_RX_CLOCK_INTERNAL
+            PARLIO_CLK_SRC_DEFAULT,
+#else
+            PARLIO_CLK_SRC_EXTERNAL,
+#endif
+        .ext_clk_freq_hz = c5vrx2_rx_clock_is_external() ?
+                           C5VRX2_RX_CLOCK_HZ : 0u,
         .exp_clk_freq_hz = MODEM_PARLIO_SAMPLE_RATE_HZ,
-        .clk_in_gpio_num = -1,
+        .clk_in_gpio_num = c5vrx2_rx_clock_is_external() ?
+                           C5VRX2_RX_CLOCK_GPIO : -1,
         .clk_out_gpio_num = -1,
         .valid_gpio_num = -1,
         .data_gpio_nums = {
@@ -1644,7 +1657,11 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
 #endif
 
     const parlio_rx_soft_delimiter_config_t delimiter_cfg = {
+#if CONFIG_C5VRX2_PARLIO_RX_NEG_EDGE
+        .sample_edge = PARLIO_SAMPLE_EDGE_NEG,
+#else
         .sample_edge = PARLIO_SAMPLE_EDGE_POS,
+#endif
         .bit_pack_order = PARLIO_BIT_PACK_ORDER_LSB,
         .eof_data_len = MODEM_PARLIO_BYTES,
         .timeout_ticks = 0u,
@@ -1748,7 +1765,14 @@ esp_err_t IRAM_ATTR c5vrx2_modem_parlio_diagnostic_run(void)
     const void *ring = continuous_iq_ring_base();
     modem_capture_header_t header = {
         .magic = MODEM_CAPTURE_MAGIC,
-        .version = MODEM_PARLIO_WBFM_ENABLED ? 9u : 8u,
+        .version = MODEM_PARLIO_WBFM_ENABLED ? 9u :
+#if CONFIG_C5VRX2_PARLIO_RX_CLOCK_MODEM_DEBUG40
+                   14u,
+#elif CONFIG_C5VRX2_PARLIO_RX_CLOCK_PLL_F40
+                   13u,
+#else
+                   12u,
+#endif
         .header_bytes = sizeof(modem_capture_header_t),
         .raw_words = MODEM_PARLIO_BYTES,
         .ring_words = C5VRX2_RF_WORDS,
@@ -1840,6 +1864,7 @@ cleanup_bs:
 cleanup_rx:
     if (rx) (void)parlio_del_rx_unit(rx);
 cleanup_pins_only:
+    c5vrx2_rx_clock_stop();
     REG32(MODEM_WIDGET_DIAG_FIX) = saved_fix;
     REG32(MODEM_WIDGET_DIAG_EXCHANGE) = saved_exchange;
     GPIO_EXT.pin_ctrl.val = saved_clk_out;
