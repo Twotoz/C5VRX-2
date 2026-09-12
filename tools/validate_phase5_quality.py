@@ -69,7 +69,7 @@ def scale_real_sum(value: int, calibration_gain: int = 2) -> int:
     return -((-numerator + 2) // 4) if numerator < 0 else (numerator + 2) // 4
 
 
-def build_lut(calibration_gain: int = 2, pedestal: int = 20) -> list[int]:
+def build_lut(calibration_gain: int = 2, pedestal: int = 26) -> list[int]:
     lut = [0] * 1024
     for previous in range(32):
         for current in range(32):
@@ -141,7 +141,7 @@ def main() -> int:
         for current in range(32):
             index = (previous << 5) | current
             delta = centroid_delta_phase8(previous, current)
-            expected = max(0, min(63, 20 + scale_real_sum(delta, 2)))
+            expected = max(0, min(63, 26 + scale_real_sum(delta, 2)))
             assert (lut[index] & 0x3F) == expected
 
     cartesian_errors: list[float] = []

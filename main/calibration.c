@@ -43,7 +43,7 @@ static uint32_t crc32_ieee(const void *data, size_t length)
 static void load_defaults(void)
 {
     s_calibration = (c5vrx2_calibration_t) {
-        .pedestal_code = 20u,
+        .pedestal_code = 26u,
         .discriminator_gain = 2u,
         .polarity = C5VRX2_POLARITY_CURRENT_MINUS_PREVIOUS,
         .output_clock_hz = 20000000u,
