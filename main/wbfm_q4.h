@@ -42,3 +42,6 @@ const void *c5vrx2_wbfm_q4_phase5_program(void);
  * persistence) fails after the isolated stages pass. */
 unsigned c5vrx2_wbfm_q4_selftest_once(void);
 #endif
+
+esp_err_t c5vrx2_wbfm_q4_configure_trajectory(bitscrambler_handle_t handle);
+const void *c5vrx2_wbfm_q4_trajectory_program(void);

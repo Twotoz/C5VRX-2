@@ -10,6 +10,7 @@ idf_component_register(
         "rf_dump.c"
         "wbfm_direct.c"
         "wbfm_q4.c"
+        "trajectory_reference.c"
         "parlio_direct.c"
         "realtime.c"
     INCLUDE_DIRS "."
@@ -56,3 +57,5 @@ target_link_options(${COMPONENT_LIB} INTERFACE
     "-T${CMAKE_CURRENT_LIST_DIR}/rf_dump_memory.ld")
 set_property(TARGET ${COMPONENT_LIB} APPEND PROPERTY LINK_DEPENDS
     "${CMAKE_CURRENT_LIST_DIR}/rf_dump_memory.ld")
+
+target_bitscrambler_add_src("c5vrx2_wbfm_q4_trajectory_2to1.bsasm")

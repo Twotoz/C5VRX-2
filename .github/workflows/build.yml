@@ -34,3 +34,43 @@ jobs:
           name: c5vrx2-full
           path: build/c5vrx2-hardware-test/
           if-no-files-found: error
+
+  trajectory-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - run: python tools/validate_trajectory.py
+      - run: python tools/validate_phase5_quality.py
+      - run: python tools/validate_continuous_pipeline.py
+
+  trajectory-build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    strategy:
+      matrix:
+        mode: [live, oracle-low, oracle-high]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build trajectory candidate and bounded oracle
+        shell: bash
+        run: |
+          source /opt/esp/idf/export.sh
+          defaults="sdkconfig.defaults;sdkconfig.flash40.defaults"
+          if [[ "${{ matrix.mode }}" != live ]]; then
+            defaults="$defaults;sdkconfig.tx-wbfm-test.defaults"
+          fi
+          defaults="$defaults;sdkconfig.trajectory.defaults"
+          if [[ "${{ matrix.mode }}" == oracle-high ]]; then
+            defaults="$defaults;sdkconfig.trajectory-high.defaults"
+          fi
+          idf.py -D SDKCONFIG_DEFAULTS="$defaults" build
+          idf.py merge-bin -o trajectory-${{ matrix.mode }}.bin -f raw
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trajectory-${{ matrix.mode }}
+          path: build/trajectory-${{ matrix.mode }}.bin
+          if-no-files-found: error

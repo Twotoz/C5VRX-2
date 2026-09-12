@@ -1,4 +1,5 @@
 #include "diagnostics.h"
+#include "trajectory_reference.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -132,7 +133,9 @@ static DRAM_ATTR uint8_t s_modem_parlio_capture[MODEM_PARLIO_BYTES]
 #define TX_WBFM_PACKED_BYTES (TX_WBFM_OUTPUT_BYTES / 2u)
 #define TX_WBFM_MAGIC        0x31584254u /* little-endian "TBX1" */
 #define TX_WBFM_VALID_GPIO   GPIO_NUM_23
-#if CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
+#if CONFIG_C5VRX2_WBFM_TRAJECTORY
+#define TX_WBFM_TEST_VARIANT 8 /* middle-sample trajectory candidate */
+#elif CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
 #define TX_WBFM_TEST_VARIANT 5 /* embedded uniform phase5 production core */
 #else
 #define TX_WBFM_TEST_VARIANT 4 /* physically proven Q3/I2 fallback */
@@ -454,6 +457,11 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
         s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
         sizeof(s_tx_wbfm_expected));
 #endif
+#elif TX_WBFM_TEST_VARIANT == 8
+    uint8_t previous_phase = 0;
+    expected_bytes = c5vrx2_trajectory_reference(
+        s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
+        sizeof(s_tx_wbfm_expected), &previous_phase);
 #elif TX_WBFM_TEST_VARIANT == 5
     expected_bytes = c5vrx2_wbfm_q4_phase5_reference(
         s_tx_wbfm_input, sizeof(s_tx_wbfm_input), s_tx_wbfm_expected,
@@ -476,12 +484,14 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
     uint32_t loop_first_mismatch = UINT32_MAX;
 #if TX_WBFM_TEST_VARIANT == 3 || \
     (TX_WBFM_TEST_VARIANT == 4 && !TX_WBFM_CONSTANT_LUT_ORACLE) || \
-    TX_WBFM_TEST_VARIANT == 5
+    TX_WBFM_TEST_VARIANT == 5 || TX_WBFM_TEST_VARIANT == 8
     bitscrambler_handle_t loop_bs = NULL;
     loop_error = bitscrambler_loopback_create(
         &loop_bs, SOC_BITSCRAMBLER_ATTACH_I2S0, TX_WBFM_INPUT_BYTES);
     if (loop_error == ESP_OK)
-        loop_error = TX_WBFM_TEST_VARIANT == 3 ?
+        loop_error = TX_WBFM_TEST_VARIANT == 8 ?
+                     c5vrx2_wbfm_q4_configure_trajectory(loop_bs) :
+                     TX_WBFM_TEST_VARIANT == 3 ?
                      c5vrx2_wbfm_q4_configure_lut3(loop_bs) :
                      (TX_WBFM_TEST_VARIANT == 5 ||
                       TX_WBFM_TEST_VARIANT == 6 ?
@@ -505,10 +515,16 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
 #endif
     /* A level delimiter consumes one of PARLIO RX's eight physical input
      * lanes, so a full-width 8-bit receive cannot also use VALID.  This
-     * bounded test captures output bits 0..3 and compares every output clock;
+     * bounded test captures bits 0..3 (or 4..7 in the high-bank build) on
+     * every output clock; run both banks on the identical deterministic input;
      * the production TX remains eight-bit and drives all six DAC bits. */
     for (size_t i = 0u; i < expected_bytes; ++i)
-        s_tx_wbfm_expected[i] &= 0x0fu;
+        s_tx_wbfm_expected[i] =
+#if CONFIG_C5VRX2_TX_ORACLE_HIGH_NIBBLE
+            (s_tx_wbfm_expected[i] >> 4u) & 0x0fu;
+#else
+            s_tx_wbfm_expected[i] & 0x0fu;
+#endif
     memset(s_tx_wbfm_actual, 0xa5, sizeof(s_tx_wbfm_actual));
     memset(s_tx_wbfm_packed, 0xa5, sizeof(s_tx_wbfm_packed));
 
@@ -557,7 +573,9 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
     /* Configure through the decorator-owned TX handle. The phase5 and IQ5
      * production programs carry their LUT in the program image so the table
      * is installed by the same load that starts the bounded transaction. */
-    setup_err = TX_WBFM_TEST_VARIANT == 3 ?
+    setup_err = TX_WBFM_TEST_VARIANT == 8 ?
+                c5vrx2_wbfm_q4_configure_trajectory(tx->bs_handle) :
+                TX_WBFM_TEST_VARIANT == 3 ?
                 c5vrx2_wbfm_q4_configure_lut3(tx->bs_handle) :
                 (TX_WBFM_TEST_VARIANT == 5 ||
                  TX_WBFM_TEST_VARIANT == 6 ?
@@ -600,7 +618,11 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
         .clk_out_gpio_num = -1,
         .valid_gpio_num = TX_WBFM_VALID_GPIO,
         .data_gpio_nums = {
+            #if CONFIG_C5VRX2_TX_ORACLE_HIGH_NIBBLE
+            GPIO_NUM_10, GPIO_NUM_5, GPIO_NUM_3, GPIO_NUM_4,
+#else
             GPIO_NUM_1, GPIO_NUM_0, GPIO_NUM_25, GPIO_NUM_7,
+#endif
             -1, -1, -1, -1,
         },
         .flags = {
@@ -650,6 +672,8 @@ esp_err_t c5vrx2_tx_wbfm_diagnostic_run(void)
             c5vrx2_wbfm_q4_lut3_program(),
 #elif TX_WBFM_TEST_VARIANT == 4
             c5vrx2_wbfm_q4_iq5_program(),
+#elif TX_WBFM_TEST_VARIANT == 8
+            c5vrx2_wbfm_q4_trajectory_program(),
 #elif TX_WBFM_TEST_VARIANT == 5
             c5vrx2_wbfm_q4_phase5_program(),
 #elif TX_WBFM_TEST_VARIANT == 6 || TX_WBFM_TEST_VARIANT == 7
@@ -715,7 +739,13 @@ persist:
 
     const tx_wbfm_header_t header = {
         .magic = TX_WBFM_MAGIC,
-        .version = TX_WBFM_TEST_VARIANT == 1 ? 3u :
+        .version = TX_WBFM_TEST_VARIANT == 8 ?
+#if CONFIG_C5VRX2_TX_ORACLE_HIGH_NIBBLE
+                   11u :
+#else
+                   10u :
+#endif
+                   TX_WBFM_TEST_VARIANT == 1 ? 3u :
                    (TX_WBFM_TEST_VARIANT == 2 ? 4u :
                    (TX_WBFM_TEST_VARIANT == 3 ? 5u :
                    (TX_WBFM_TEST_VARIANT == 4 ? 6u :

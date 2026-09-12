@@ -78,6 +78,28 @@ config C5VRX2_WBFM_SELFTEST_ONCE
         program through its hardware loopback, compare against the C reference,
         and persist input/actual/expected data in diagcap. RF is not started.
 
+config C5VRX2_WBFM_TRAJECTORY
+    bool "Test middle-sample trajectory LUT (issue 9 candidate)"
+    depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_TX_WBFM_TEST
+    default n
+    help
+        Two-bundle 40 MS/s IQ to 20 MS/s DAC candidate with an embedded
+        phase4/middle-signs/phase4 trajectory table. Overrides phase5 when
+        enabled. Fixed gain=2, pedestal=20, current-minus-previous polarity.
+        The shipped uniform geometry prior is NOT capture-trained. Keep
+        phase5 as the default until independent capture and hardware A/B
+        validation pass. Uses bounded TX oracle variant 8 in test mode.
+
+config C5VRX2_TX_ORACLE_HIGH_NIBBLE
+    bool "Capture trajectory oracle output bits 4..7"
+    depends on C5VRX2_MODE_TX_WBFM_TEST && C5VRX2_WBFM_TRAJECTORY
+    default n
+    help
+        Complement the default low-nibble oracle with the high output bank.
+        VALID consumes an RX lane, so both banks need separate deterministic
+        runs. TX pin order, rate and embedded program remain identical.
+        Diagnostic record version 10 is low bank, 11 is high bank.
+
 config C5VRX2_WBFM_PHASE5_QUALITY
     bool "Use uniform five-bit polar WBFM core"
     depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_TX_WBFM_TEST
