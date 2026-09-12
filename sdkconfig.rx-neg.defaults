@@ -1,0 +1,2 @@
+# Physical opposite-edge A/B; labels are not assumed to match silicon polarity.
+CONFIG_C5VRX2_PARLIO_RX_NEG_EDGE=y

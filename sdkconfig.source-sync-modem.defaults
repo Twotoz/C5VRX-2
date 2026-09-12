@@ -1,0 +1,3 @@
+# Issue-12 experimental candidate. DIAG21 must be verified on a scope/LA.
+CONFIG_C5VRX2_PARLIO_RX_CLOCK_MODEM_DEBUG40=y
+CONFIG_C5VRX2_MODEM_DEBUG40_DIAG_SIGNAL=21

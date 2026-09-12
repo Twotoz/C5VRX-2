@@ -11,6 +11,7 @@ idf_component_register(
         "wbfm_direct.c"
         "wbfm_q4.c"
         "trajectory_reference.c"
+        "rx_clock.c"
         "parlio_direct.c"
         "realtime.c"
     INCLUDE_DIRS "."
@@ -32,6 +33,7 @@ idf_component_register(
         esp_mm
         esp_pm
         esp_timer
+        esp_hw_support
         heap
 )
 

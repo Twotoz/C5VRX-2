@@ -1,0 +1,2 @@
+# Issue-12 A/B candidate: documented PLL_F40M -> GPIO2 -> PARLIO CLK_IN.
+CONFIG_C5VRX2_PARLIO_RX_CLOCK_PLL_F40=y

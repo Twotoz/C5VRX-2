@@ -74,3 +74,41 @@ jobs:
           name: trajectory-${{ matrix.mode }}
           path: build/trajectory-${{ matrix.mode }}.bin
           if-no-files-found: error
+
+  source-sync-build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    strategy:
+      matrix:
+        clock: [internal, pll, modem]
+        edge: [pos, neg]
+        mode: [capture, live]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build issue-12 physical A/B image
+        shell: bash
+        run: |
+          source /opt/esp/idf/export.sh
+          defaults="sdkconfig.defaults;sdkconfig.flash40.defaults"
+          if [[ "${{ matrix.mode }}" == capture ]]; then
+            defaults="$defaults;sdkconfig.modem-parlio.defaults"
+          else
+            defaults="$defaults;sdkconfig.trajectory.defaults"
+          fi
+          if [[ "${{ matrix.clock }}" == pll ]]; then
+            defaults="$defaults;sdkconfig.source-sync-pll.defaults"
+          elif [[ "${{ matrix.clock }}" == modem ]]; then
+            defaults="$defaults;sdkconfig.source-sync-modem.defaults"
+          fi
+          if [[ "${{ matrix.edge }}" == neg ]]; then
+            defaults="$defaults;sdkconfig.rx-neg.defaults"
+          fi
+          idf.py -B build-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }} \
+            -D SDKCONFIG_DEFAULTS="$defaults" build
+          idf.py -B build-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }} \
+            merge-bin -o issue12-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }}.bin -f raw
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue12-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }}
+          path: issue12-${{ matrix.clock }}-${{ matrix.edge }}-${{ matrix.mode }}.bin
+          if-no-files-found: error

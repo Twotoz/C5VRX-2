@@ -112,12 +112,45 @@ config C5VRX2_WBFM_PHASE5_QUALITY
 
 config C5VRX2_PARLIO_RX_NEG_EDGE
     bool "Sample MODEM_DIAG on the opposite PARLIO RX clock edge"
-    depends on C5VRX2_MODE_LIVE
+    depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_MODEM_PARLIO || C5VRX2_MODE_MODEM_WBFM
     default n
     help
         Hardware A/B for GPIO-matrix setup/hold margin. The ESP-IDF edge
         labels have changed semantics on some C5 revisions, so POS/NEG are
         treated only as two physical candidates. This does not change the
         40 MS/s receive rate or the 20 MS/s DAC rate.
+
+choice C5VRX2_PARLIO_RX_CLOCK
+    prompt "PARLIO RX acquisition clock"
+    depends on C5VRX2_MODE_LIVE || C5VRX2_MODE_MODEM_PARLIO || C5VRX2_MODE_MODEM_WBFM
+    default C5VRX2_PARLIO_RX_CLOCK_INTERNAL
+
+config C5VRX2_PARLIO_RX_CLOCK_INTERNAL
+    bool "Internal PLL_F240M-derived 40 MHz (A/B baseline)"
+
+config C5VRX2_PARLIO_RX_CLOCK_PLL_F40
+    bool "External PLL_F40M on GPIO2 (phase-related candidate)"
+    help
+        Route the documented PLL_F40M clock-output source to GPIO2 and feed
+        it back into PARLIO CLK_IN. This is not called source-synchronous
+        until the raw-IQ hardware A/B passes.
+
+config C5VRX2_PARLIO_RX_CLOCK_MODEM_DEBUG40
+    bool "External MODEM DEBUG_CLK40 on GPIO2 (experimental source-sync)"
+    help
+        Enable MODEM_SYSCON FPGA_DEBUG_CLK40/CLKSWITCH and route a selected
+        MODEM_DIAG lane to GPIO2 -> PARLIO CLK_IN. ESP32-C5 headers prove the
+        control bit exists but do not document which DIAG lane carries it.
+        Use only the issue-12 hardware matrix until lane and edge are proven.
+endchoice
+
+config C5VRX2_MODEM_DEBUG40_DIAG_SIGNAL
+    int "MODEM_DIAG lane carrying DEBUG_CLK40"
+    depends on C5VRX2_PARLIO_RX_CLOCK_MODEM_DEBUG40
+    range 0 31
+    default 21
+    help
+        DIAG21 is a test hypothesis, not a production fact. Record the lane
+        and verify a continuous 40 MHz waveform with a scope or logic analyzer.
 
 endmenu

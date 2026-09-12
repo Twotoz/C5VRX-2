@@ -22,7 +22,14 @@ HEADER_WORDS = 21
 HEADER_BYTES = 128
 GPIO_PINS = (1, 0, 25, 7, 10, 5, 3, 4)
 EXPECTED_BITS = (6, 7, 8, 9, 16, 17, 18, 19)
-PARLIO_RATES_HZ = {version: 40_000_000.0 for version in (4, 5, 6, 7, 8)}
+PARLIO_RATES_HZ = {
+    version: 40_000_000.0 for version in (4, 5, 6, 7, 8, 12, 13, 14)
+}
+RX_CLOCK_BY_VERSION = {
+    12: "PARLIO internal 40 MHz",
+    13: "PLL_F40M -> GPIO2 -> PARLIO CLK_IN",
+    14: "MODEM DEBUG_CLK40 candidate -> GPIO2 -> PARLIO CLK_IN",
+}
 
 
 def load_capture(path: Path) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
@@ -35,9 +42,10 @@ def load_capture(path: Path) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
         "ring_hash", "capture_end_pointer", "capture_end_ptr_mode", "stop_us",
     )
     header = dict(zip(names, struct.unpack_from("<21I", blob)))
-    if header["magic"] != MAGIC or header["version"] not in (1, 4, 5, 6, 7, 8, 9):
+    supported = (1, 4, 5, 6, 7, 8, 9, 12, 13, 14)
+    if header["magic"] != MAGIC or header["version"] not in supported:
         raise ValueError(
-            "capture is not a complete MODEM_CAPTURE (v1/v4/v5/v6/v7/v8/v9)")
+            f"capture is not a complete MODEM_CAPTURE (supported: {supported})")
     if header["header_bytes"] != HEADER_BYTES:
         raise ValueError("unsupported capture header size")
     if header["version"] != 1:
@@ -219,6 +227,7 @@ def main() -> None:
 
     print(f"RF rate:             {header['rf_rate_hz']} samples/s")
     print(f"capture transport:   {'CPU GPIO' if header['version'] == 1 else 'PARLIO RX'}")
+    print(f"RX clock:            {RX_CLOCK_BY_VERSION.get(header['version'], 'legacy/unspecified')}")
     print(f"producer/wraps/trig: {header['producer_starts']}/"
           f"{header['physical_wraps']}/{header['trigger_count']}")
     print("mapping:             DIAG[6:9]=Q[6:9], DIAG[16:19]=I[6:9]")
