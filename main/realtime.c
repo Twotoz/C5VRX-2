@@ -26,7 +26,7 @@
 #include "wbfm_q4.h"
 
 #define MODEM_IQ_RATE_HZ 40000000u
-#define CVBS_RATE_HZ     20000000u
+#define CVBS_RATE_HZ     40000000u
 #define RAW_BLOCK_BYTES      4096u
 #define RAW_RING_BLOCKS         4u
 #define RAW_RING_BYTES (RAW_BLOCK_BYTES * RAW_RING_BLOCKS)
@@ -48,8 +48,8 @@ static const gpio_num_t s_iq_pins[8] = {
 static const uint8_t s_iq_diag[8] = {6u, 7u, 8u, 9u, 16u, 17u, 18u, 19u};
 
 /* RX-GDMA writes raw Q4/I4 at 40 MB/s. TX-GDMA reads the same bytes at
- * 40 MB/s and its BitScrambler emits one 6-bit CVBS sample per two input
- * bytes. Both units derive 40:20 MHz from PLL_F240M. Starting TX one block
+ * 40 MB/s and its BitScrambler emits two 6-bit CVBS samples per two input
+ * bytes (40 MS/s). Both units derive 40 MHz from PLL_F240M / 6. Starting TX one block
  * behind RX keeps producer and consumer away from the same bytes without a
  * CPU copy or a second CVBS ring. */
 static DMA_ATTR __attribute__((aligned(64))) uint8_t s_raw_ring[RAW_RING_BYTES];
@@ -246,7 +246,7 @@ static void telemetry_task(void *argument)
          * scans or copies the DMA ring: USB/logging cannot contend for its
          * SRAM bandwidth or become part of realtime pacing. */
         ESP_LOGI(TAG,
-                 "LIVE raw_in=40M tx_bs_out=20M ptr=%u enable=%u done=%u "
+                 "LIVE raw_in=40M tx_bs_out=40M ptr=%u enable=%u done=%u "
                  "stalls=%u starts=1 rearms=0",
                  (unsigned)current, (control & CTRL_ENABLE) != 0u,
                  (control & CTRL_DONE) != 0u, (unsigned)stalls);
@@ -385,8 +385,8 @@ esp_err_t c5vrx2_realtime_start(void)
              "GDMA/flash; WBFM and DAC bypassed");
 #else
     ESP_LOGW(TAG,
-             "LIVE ACTIVE: MODEM 80M -> coherent /2 Q4/I4 40M -> direct "
-             "two-sample WBFM LUT -> CVBS 20M -> 6-bit DAC; measured_rf=%u "
+             "LIVE ACTIVE: MODEM 80M -> coherent /2 Q4/I4 40M -> Phase 5 "
+             "WBFM -> CVBS 40M -> 6-bit DAC; measured_rf=%u "
              "pedestal=%u gain=%u polarity=%u",
              (unsigned)continuous_iq_sample_rate_hz(),
              cal->pedestal_code, cal->discriminator_gain,

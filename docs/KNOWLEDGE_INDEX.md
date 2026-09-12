@@ -35,6 +35,7 @@ Modern C5VRX
 | Static root causes, digital filtering limits, analog capacitor de-emphasis | [static-reduction-and-filtering.md](static-reduction-and-filtering.md) |
 | Issue #11 20 MS/s digital CVBS stream measurement and timing proof | [issue-11-cvbs-analysis.md](issue-11-cvbs-analysis.md) |
 | Fix for CVBS horizontal line jitter, trajectory wrap, and static | [fix-cvbs-jitter-and-static.md](fix-cvbs-jitter-and-static.md) |
+| Diagnostic LED firmware, empirical findings, 9-line raster beat, and 40 MS/s DAC | [diagnostic-led-firmware.md](diagnostic-led-firmware.md) |
 | Wiring and remaining physical tests | [hardware-test.md](hardware-test.md) |
 | Accepted historical donor primitives | [proven-donors.md](proven-donors.md) |
 | Licensing and contributor evidence | [licensing.md](licensing.md) |

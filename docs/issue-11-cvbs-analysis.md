@@ -89,7 +89,13 @@ Analysis of the 12,000 samples (nominal NTSC line length = 63.555 µs / 1271.11 
    clock cycles.
 3. **Remedy:**
    - In hardware: An RC reconstruction filter (e.g. 330 pF – 470 pF across the 200 Ω
-     resistor to GND) acts as an analog de-emphasis filter, smoothing the 20 MHz DAC
+     resistor to GND) acts as an analog de-emphasis filter, smoothing the DAC
      steps and attenuating the high-frequency discriminator noise on sync edges.
    - In software: Demodulator calibration must maintain sync tips cleanly at code 0 and
      pedestal at code 20 without clipping burst dynamics.
+   - In architecture: Upgraded from 20 MS/s to **40 MS/s DAC oversampling** with dual-sample
+     BitScrambler emission (`write 16`), cutting discrete step duration from 50 ns to 25 ns,
+     suppressing sub-sample raster jitter (the 9-line sawtooth beat), and pushing DAC reconstruction
+     images from 16.42 MHz to 36.42 MHz.
+   - See [diagnostic-led-firmware.md](diagnostic-led-firmware.md) for full diagnostic capture
+     firmware implementation, LED signaling protocol, and mathematical derivations.

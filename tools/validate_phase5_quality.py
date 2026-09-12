@@ -69,7 +69,7 @@ def scale_real_sum(value: int, calibration_gain: int = 2) -> int:
     return -((-numerator + 2) // 4) if numerator < 0 else (numerator + 2) // 4
 
 
-def build_lut(calibration_gain: int = 2, pedestal: int = 26) -> list[int]:
+def build_lut(calibration_gain: int = 2, pedestal: int = 20) -> list[int]:
     lut = [0] * 1024
     for previous in range(32):
         for current in range(32):
@@ -95,11 +95,11 @@ def validate_sources(repo: Path) -> None:
     # reads the next pair while writing the preceding pair, leaving exactly
     # two steady-state bundles per output.
     assert asm.count("read 16") == 2
-    assert asm.count("write 8") == 1
+    assert asm.count("write 16") == 1
     assert asm.count("set 16 8") == 2
     assert "jmp address_delta" in asm
     assert "set 16 L8" in asm and "set 20 L12" in asm
-    assert "set 21 O8" in asm and "set 25 O12" in asm
+    assert "set 21 O26" in asm and "set 25 O30" in asm
     assert "set 0..5 L0..L5" in asm
     assert "lut " + " ".join(map(str, build_lut())) in asm
     assert "q4_phase5" in source
@@ -141,7 +141,7 @@ def main() -> int:
         for current in range(32):
             index = (previous << 5) | current
             delta = centroid_delta_phase8(previous, current)
-            expected = max(0, min(63, 26 + scale_real_sum(delta, 2)))
+            expected = max(0, min(63, 20 + scale_real_sum(delta, 2)))
             assert (lut[index] & 0x3F) == expected
 
     cartesian_errors: list[float] = []
