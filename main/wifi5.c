@@ -100,16 +100,12 @@ esp_err_t c5vrx2_wifi5_start_a1(void)
 
     wifi_bandwidths_t bandwidths = {
         .ghz_2g = WIFI_BW20,
-        .ghz_5g = WIFI_BW40,
+        .ghz_5g = WIFI_BW20,
     };
     continuous_iq_debug_mark(310u);
-    ESP_LOGI(TAG, "startup 310: esp_wifi_set_bandwidths");
-    err = esp_wifi_set_bandwidths(WIFI_IF_STA, &bandwidths);
-    if (err != ESP_OK) {
-        bandwidths.ghz_5g = WIFI_BW20;
-        if ((err = esp_wifi_set_bandwidths(WIFI_IF_STA, &bandwidths)) != ESP_OK)
-            return err;
-    }
+    ESP_LOGI(TAG, "startup 310: esp_wifi_set_bandwidths(WIFI_BW20)");
+    if ((err = esp_wifi_set_bandwidths(WIFI_IF_STA, &bandwidths)) != ESP_OK)
+        return err;
 
     /* A1 is exactly Wi-Fi channel 173 = 5865 MHz on the C5 public driver. */
     continuous_iq_debug_mark(311u);

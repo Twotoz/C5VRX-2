@@ -33,6 +33,8 @@ Modern C5VRX
 | Current image-quality path and proof gates | [image-quality.md](image-quality.md) |
 | Corrected issue #6 winding/static measurements | [issue-6-static-analysis.md](issue-6-static-analysis.md) |
 | Static root causes, digital filtering limits, analog capacitor de-emphasis | [static-reduction-and-filtering.md](static-reduction-and-filtering.md) |
+| Issue #11 20 MS/s digital CVBS stream measurement and timing proof | [issue-11-cvbs-analysis.md](issue-11-cvbs-analysis.md) |
+| Fix for CVBS horizontal line jitter, trajectory wrap, and static | [fix-cvbs-jitter-and-static.md](fix-cvbs-jitter-and-static.md) |
 | Wiring and remaining physical tests | [hardware-test.md](hardware-test.md) |
 | Accepted historical donor primitives | [proven-donors.md](proven-donors.md) |
 | Licensing and contributor evidence | [licensing.md](licensing.md) |

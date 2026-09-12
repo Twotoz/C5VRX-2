@@ -23,7 +23,7 @@ def observations(p, m, c):
     endpoint = wrap_r(PHI[c] - PHI[p])
     adjacent = wrap_r(PHI[m] - PHI[p]) + wrap_r(PHI[c] - PHI[m])
     branch = np.rint((adjacent - endpoint) / (2 * np.pi)).astype(int)
-    target = scale(np.rint(adjacent * 256 / (2 * np.pi)).astype(int))
+    target = scale(np.rint(wrap_r(adjacent) * 256 / (2 * np.pi)).astype(int))
     fallback = scale(np.rint(endpoint * 256 / (2 * np.pi)).astype(int))
     address = P4[p] | (QUAD[m] << 4) | (P4[c] << 6)
     return address, target, fallback, branch
@@ -52,7 +52,7 @@ def prior_groups():
 def capture_groups(paths):
     for path in paths:
         hdr, raw = load(path)
-        if hdr['iq_rate_hz'] != 40_000_000 or hdr['cvbs_rate_hz'] != 20_000_000:
+        if hdr['iq_rate_hz'] != 40_000_000 or hdr['cvbs_rate_hz'] not in (0, 20_000_000):
             raise ValueError(f'{path}: requires raw 40 -> 20 MS/s snapshot')
         if len(raw) < 4:
             raise ValueError(f'{path}: too short')
@@ -60,7 +60,7 @@ def capture_groups(paths):
         yield raw[1:1+2*n:2], raw[2:2+2*n:2], raw[3:3+2*n:2]
 
 
-def select(stats, fallback=None, min_count=32, confidence=.9):
+def select(stats, fallback=None, min_count=16, confidence=.85):
     count, sums, endpoints, branches = stats
     denom = np.maximum(count, 1)
     conservative = np.rint(endpoints / denom).astype(int)
