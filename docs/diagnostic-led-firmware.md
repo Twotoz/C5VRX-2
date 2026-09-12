@@ -152,3 +152,35 @@ In main/realtime.c:
 | RF Bandwidth | WIFI_BW20 | **WIFI_BW40** | Full Carson FM bandwidth for 3.58 MHz color subcarrier |
 | DAC Output Rate | 20 MS/s (50 ns) | **40 MS/s (25 ns)** | Halves discrete hold time; pushes DAC images to 36 MHz |
 | BitScrambler IO | read 16 / write 8 | **read 16 / write 16** | Dual-byte output for 40 MS/s DAC oversampling |
+
+---
+
+## 7. Live Hardware Verification & Visual Results
+
+Physical hardware testing on a live analog display with the production 40 MS/s Phase 5 firmware (`c5vrx2_realtime_iq.bin`) confirmed the mathematical predictions:
+
+### A. Video Static & Noise Elimination
+- **Result:** Video static is virtually eliminated across the screen.
+- **Cause:** Restoring the Phase 5 polar demodulator with 32 radial phase centroids eliminated the spurious phase wrap jumps and white-clipping spikes that occurred under noisy RF conditions in the Trajectory LUT.
+- **Dynamic Headroom:** Blanking pedestal 20 provides full 20-code headroom for sync tips (code 0) without clipping negative-going color burst excursions.
+
+### B. Stable Chroma Decoding & Color Lock
+- **Result:** Color lock is solid and clean; no flashing "color bombs" or alternating red/green Hanover bars.
+- **Cause:** Halving the discrete DAC step duration to 25 ns reduced the worst-case color-burst sampling displacement from $\pm 64.4^\circ$ to $\pm 32.2^\circ$. This remains well within the locking bandwidth of standard analog TV chroma PLLs.
+
+### C. Confirmation of 40 MS/s Dynamics: Multiple Tiny Sawtooths
+- **Observation on Hardware:** The coarse 50 ns diagonal sawtooth edges collapsed into much smaller, higher-frequency sawtooth ripples ("meerdere sawtooths, hele kleintjes").
+- **Mathematical Confirmation:**
+  At 40 MS/s, each horizontal line spans:
+  $$N_{\text{samples}} = 63.555556\ \mu\text{s} \times 40\text{ MHz} = 2542 + \mathbf{\frac{2}{9}}\text{ samples/line}$$
+  Because the fractional phase advancement per line is $+2/9$ instead of $+1/9$:
+  * Quantization slips occur when fractional phase wraps past 1.0, which happens every **$\approx 4.5$ lines** (specifically at lines 5 $\to$ 6, and lines 9 $\to$ 10).
+  * This **doubles the spatial repetition frequency** of the edge artifact (producing multiple smaller sawtooths along the vertical edge).
+  * Simultaneously, the discrete DAC hold time is halved from 50 ns to **25 ns**, cutting the visual horizontal displacement amplitude by 50% (producing tiny ripples rather than large tears).
+
+### D. Final Hardware Polishing: Analog Reconstruction Filter
+To eliminate even the residual 25 ns sub-sample steps:
+- Placing a small ceramic capacitor (**330 pF to 470 pF**) directly across the 200 $\Omega$ pull-down resistor to GND (between `VIDEO` pin and `GND`) creates a 1st-order low-pass filter:
+  $$f_c = \frac{1}{2\pi R_{\text{eq}} C} \approx 6\text{--}8\text{ MHz}$$
+- Because the 40 MS/s DAC images now sit at $40 - 3.58 = 36.42\text{ MHz}$ (far above the 4.2 MHz NTSC video bandwidth), this simple capacitor smoothly interpolates the 25 ns discrete steps into continuous analog curves without softening luminance detail or attenuating color subcarrier.
+

@@ -98,4 +98,6 @@ Analysis of the 12,000 samples (nominal NTSC line length = 63.555 µs / 1271.11 
      suppressing sub-sample raster jitter (the 9-line sawtooth beat), and pushing DAC reconstruction
      images from 16.42 MHz to 36.42 MHz.
    - See [diagnostic-led-firmware.md](diagnostic-led-firmware.md) for full diagnostic capture
-     firmware implementation, LED signaling protocol, and mathematical derivations.
+     firmware implementation, LED signaling protocol, mathematical derivations, and Section 7
+     for physical hardware verification results (elimination of static, solid color lock, and
+     confirmation of halved 25 ns sawtooth amplitude).
