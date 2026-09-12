@@ -76,19 +76,17 @@ quantization banding and coarse threshold crossings.
 
 ## 3. Firmware Fixes Applied
 
-### 1. Narrowing Wi-Fi 5 GHz Analog Filter to `WIFI_BW20`
-In `main/wifi5.c`:
-```c
-wifi_bandwidths_t bandwidths = {
-    .ghz_2g = WIFI_BW20,
-    .ghz_5g = WIFI_BW20,
-};
-ESP_LOGI(TAG, "startup 310: esp_wifi_set_bandwidths(WIFI_BW20)");
-if ((err = esp_wifi_set_bandwidths(WIFI_IF_STA, &bandwidths)) != ESP_OK)
-    return err;
-```
-This forces the ESP32-C5 RF frontend to engage its 20 MHz analog channel filter,
-cutting 3 dB of high-frequency thermal noise out before the ADC.
+### 1. RF Baseband Bandwidth Requirement (`WIFI_BW40` is Mandatory)
+Initially, testing hypothesized that setting `WIFI_BW20` would cut out-of-band RF noise.
+However, physical hardware testing immediately disproved this hypothesis:
+- Carson's bandwidth for 5.8 GHz analog video with 4.43 MHz / 3.58 MHz color subcarrier
+  is $B = 2(\Delta f + f_m) \approx 16\text{--}18\text{ MHz}$.
+- `WIFI_BW20` restricts the on-chip complex baseband filter to ~8–9 MHz, cutting off
+  the FM color-burst sidebands and high-frequency luminance.
+- On hardware, `WIFI_BW20` caused immediate loss of resolution and severe chroma PLL
+  unlock (alternating red and green "Hanover bars" across lines).
+- Therefore, **`WIFI_BW40` is strictly mandatory** to preserve the full video modulation
+  spectrum. Pre-discriminator filtering cannot substitute for post-discriminator de-emphasis.
 
 ### 2. Correcting Trajectory Phase Wrapping in `tools/train_trajectory_lut.py`
 In `tools/train_trajectory_lut.py`:
