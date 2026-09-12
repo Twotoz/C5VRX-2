@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import argparse
+import functools
 import math
 from pathlib import Path
 
 
 TAU = 2.0 * math.pi
+INVALID_STATE = 31
+MIN_AMPLITUDE2 = 5
 
 
 def signed_bucket_center(code: int, bits: int) -> float:
@@ -37,22 +41,58 @@ def phase5(packed: int) -> int:
     return round(exact_phase(packed) * 32.0 / TAU) & 0x1F
 
 
+def signed_q4(code: int) -> int:
+    return code - 16 if code >= 8 else code
+
+
+def phase5_state(packed: int) -> int:
+    q = signed_q4(packed & 0x0F)
+    i = signed_q4(packed >> 4)
+    if i * i + q * q < MIN_AMPLITUDE2:
+        return INVALID_STATE
+    phase = phase5(packed)
+    return 0 if phase == 31 else phase
+
+
+@functools.lru_cache(maxsize=None)
+def phase5_centroids() -> list[float]:
+    result: list[float] = []
+    for state in range(INVALID_STATE):
+        members = [exact_phase(packed) for packed in range(256)
+                   if phase5_state(packed) == state]
+        sine = sum(math.sin(value) for value in members)
+        cosine = sum(math.cos(value) for value in members)
+        result.append(math.atan2(sine, cosine))
+    return result
+
+
+@functools.lru_cache(maxsize=None)
+def phase5_centroid_phase8() -> list[int]:
+    return [round(value * 256.0 / TAU) for value in phase5_centroids()]
+
+
+def centroid_delta_phase8(previous: int, current: int) -> int:
+    centers = phase5_centroid_phase8()
+    delta = (centers[current] - centers[previous] + 128) % 256 - 128
+    return delta
+
+
 def scale_real_sum(value: int, calibration_gain: int = 2) -> int:
     numerator = value * (calibration_gain + 1)
     return -((-numerator + 2) // 4) if numerator < 0 else (numerator + 2) // 4
 
 
-def build_lut() -> list[int]:
+def build_lut(calibration_gain: int = 2) -> list[int]:
     lut = [0] * 1024
     for previous in range(32):
         for current in range(32):
-            delta = (current - previous) & 0x1F
-            if delta >= 16:
-                delta -= 32
-            code = max(0, min(63, 20 + scale_real_sum(delta * 8)))
+            code = 20
+            if previous != INVALID_STATE and current != INVALID_STATE:
+                delta = centroid_delta_phase8(previous, current)
+                code = max(0, min(63, 20 + scale_real_sum(delta, calibration_gain)))
             lut[(previous << 5) | current] = code
     for packed in range(256):
-        lut[packed] |= phase5(packed) << 8
+        lut[packed] |= phase5_state(packed) << 8
     return lut
 
 
@@ -78,13 +118,32 @@ def validate_sources(repo: Path) -> None:
     assert "set 0..5 L0..L5" in asm
     assert "lut " + " ".join(map(str, build_lut())) in asm
     assert "q4_phase5" in source
+    assert "q4_phase5_state" in source
     assert "c5vrx2_wbfm_q4_phase5_program" in realtime
     assert "CONFIG_C5VRX2_MODE_LIVE=y" in defaults
     assert "CONFIG_C5VRX2_WBFM_PHASE5_QUALITY=y" in defaults
 
 
+def rewrite_embedded_lut(repo: Path) -> None:
+    path = repo / "main" / "c5vrx2_wbfm_q4_phase5_2to1.bsasm"
+    lines = path.read_text().splitlines()
+    replacement = "lut " + " ".join(map(str, build_lut()))
+    lut_lines = [index for index, line in enumerate(lines)
+                 if line.startswith("lut ")]
+    if len(lut_lines) != 1:
+        raise RuntimeError("expected exactly one embedded LUT")
+    lines[lut_lines[0]] = replacement
+    path.write_text("\n".join(lines) + "\n")
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rewrite-lut", action="store_true",
+                        help="regenerate the embedded assembly LUT")
+    args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
+    if args.rewrite_lut:
+        rewrite_embedded_lut(repo)
     validate_sources(repo)
     lut = build_lut()
     assert len(lut) == 1024
@@ -92,14 +151,14 @@ def main() -> int:
     # Prove that overlapping raw-phase and pair-delta addresses do not collide:
     # they occupy disjoint bits of the same 16-bit word.
     for packed in range(256):
-        assert ((lut[packed] >> 8) & 0x1F) == phase5(packed)
+        assert ((lut[packed] >> 8) & 0x1F) == phase5_state(packed)
     for previous in range(32):
         for current in range(32):
             index = (previous << 5) | current
-            delta = (current - previous) & 0x1F
-            if delta >= 16:
-                delta -= 32
-            expected = max(0, min(63, 20 + scale_real_sum(delta * 8)))
+            expected = 20
+            if previous != INVALID_STATE and current != INVALID_STATE:
+                delta = centroid_delta_phase8(previous, current)
+                expected = max(0, min(63, 20 + scale_real_sum(delta, 2)))
             assert (lut[index] & 0x3F) == expected
 
     cartesian_errors: list[float] = []
@@ -109,10 +168,12 @@ def main() -> int:
         i = signed_bucket_center(packed >> 4, 4)
         if i * i + q * q <= 128.0 * 128.0:
             continue
+        if phase5_state(packed) == INVALID_STATE:
+            continue
         reference = exact_phase(packed)
         cartesian_errors.append(abs(wrapped(compact_iq5_phase(packed) -
                                             reference)))
-        quantized = phase5(packed) * TAU / 32.0
+        quantized = phase5_centroids()[phase5_state(packed)]
         polar_errors.append(abs(wrapped(quantized - reference)))
 
     cartesian_rms = rms_degrees(cartesian_errors)
@@ -120,19 +181,25 @@ def main() -> int:
     cartesian_max = math.degrees(max(cartesian_errors))
     polar_max = math.degrees(max(polar_errors))
     assert polar_rms < cartesian_rms * 0.4
-    assert polar_max < cartesian_max * 0.25
+    # Reserving one state for unreliable near-origin vectors merges the small
+    # -11.25-degree cluster into state zero. Keep the worst reliable-vector
+    # error comfortably below half of the old Cartesian quantizer's maximum.
+    assert polar_max < cartesian_max * 0.5
 
-    # Explicit branch-cut check: 31 -> 0 is +1 phase step, not -31.
-    branch_delta = (0 - 31) & 0x1F
-    if branch_delta >= 16:
-        branch_delta -= 32
-    assert branch_delta == 1
+    # Explicit branch-cut check around +pi/-pi remains a small positive step.
+    assert centroid_delta_phase8(15, 16) == 8
+
+    output_codes = sorted({value & 0x3F for value in lut})
+    assert len(output_codes) >= 40
 
     print("five-bit polar WBFM quality validation PASS")
     print(f"  Q3/I2 Cartesian phase error: {cartesian_rms:.2f} deg RMS, "
           f"{cartesian_max:.2f} deg max")
     print(f"  phase5 polar phase error:     {polar_rms:.2f} deg RMS, "
           f"{polar_max:.2f} deg max")
+    print(f"  centroid delta DAC levels:    {len(output_codes)}")
+    print(f"  near-origin invalid states:   "
+          f"{sum(phase5_state(value) == INVALID_STATE for value in range(256))}")
     print("  all 1024 dual-purpose LUT entries and modulo wrap verified")
     return 0
 

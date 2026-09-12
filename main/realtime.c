@@ -254,6 +254,19 @@ static void live_snapshot_task(void *argument)
     /* Allow the ring to make many laps after all transports have started. */
     vTaskDelay(pdMS_TO_TICKS(1000));
     vTaskDelay(pdMS_TO_TICKS(20));
+
+    /* Freeze the producer before copying. Copying a 16-KiB ring while GDMA
+     * overwrites it at 40 MB/s creates an artificial torn boundary and makes
+     * duplicate/missing-sample analysis meaningless. Snapshot mode is a
+     * bounded diagnostic, so stopping here cannot affect production-live. */
+    const uint32_t writer = reg32(DUMP_PTR_MODE) & PTR_MASK;
+    const uint32_t control = reg32(DUMP_CTRL);
+    if (s_tx) (void)parlio_tx_unit_disable(s_tx);
+    (void)parlio_rx_soft_delimiter_start_stop(s_rx, s_rx_delimiter, false);
+    (void)parlio_rx_unit_disable(s_rx);
+    if (continuous_iq_is_running()) (void)continuous_iq_stop();
+    (void)esp_cache_msync(s_raw_ring, sizeof(s_raw_ring),
+                          ESP_CACHE_MSYNC_FLAG_DIR_M2C);
     memcpy(s_raw_snapshot, s_raw_ring, sizeof(s_raw_snapshot));
 
     uint32_t sum = 0u;
@@ -267,13 +280,6 @@ static void live_snapshot_task(void *argument)
         sum += sample;
         transitions += i != 0u && sample != s_raw_snapshot[i - 1u];
     }
-
-    const uint32_t writer = reg32(DUMP_PTR_MODE) & PTR_MASK;
-    const uint32_t control = reg32(DUMP_CTRL);
-    if (s_tx) (void)parlio_tx_unit_disable(s_tx);
-    (void)parlio_rx_soft_delimiter_start_stop(s_rx, s_rx_delimiter, false);
-    (void)parlio_rx_unit_disable(s_rx);
-    if (continuous_iq_is_running()) (void)continuous_iq_stop();
 
     const live_capture_header_t header = {
         .magic = LIVE_CAPTURE_MAGIC,
