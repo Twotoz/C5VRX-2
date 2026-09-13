@@ -158,7 +158,16 @@ void app_main(void)
     err = c5vrx2_linear80_oracle_run();
     gpio_set_level(XIAO_USER_LED, err == ESP_OK ? 0 : 1);
     ESP_LOGW(TAG, "LINEAR80 ORACLE COMPLETE: %s; RF remained off",esp_err_to_name(err));
-    for (;;) vTaskDelay(portMAX_DELAY);
+    /* This diagnostic is one-shot, not a receiver. Keep failure visibly
+     * distinguishable from power loss, without repeating tests/flash writes. */
+    for (;;) {
+        if (err != ESP_OK) {
+            gpio_set_level(XIAO_USER_LED, 0);
+            vTaskDelay(pdMS_TO_TICKS(150));
+            gpio_set_level(XIAO_USER_LED, 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1850));
+    }
 #endif
 
     err = c5vrx2_wifi5_start_a1();
