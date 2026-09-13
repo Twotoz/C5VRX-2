@@ -95,13 +95,15 @@ static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows, const voi
 /* RF-off repeating deterministic input, persistent BS state across DMA wraps.
  * Read the six existing DAC pads at requested RX40; TX80 is undersampled.
  * No external clock pins, resistor changes, or CPU sample processing. */
-static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned fast)
+static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
 {
+    unsigned fast=trial&1u, mode=trial/2u;
     parlio_tx_unit_handle_t tx=NULL;
     parlio_rx_unit_handle_t rx=NULL;
     parlio_rx_delimiter_handle_t delimiter=NULL;
     bool decorated=false, te=false, re=false;
     uint32_t h[16]={0x5044384c,1,64,4096,fast?80000000:40000000,40000000};
+    h[14]=mode; /* 0 linear80, 1 direct bytes, 2 existing Phase5 */
     h[6]=h[7]=h[8]=UINT32_MAX;
     memset(capture,0xa5,4096);
     const parlio_tx_unit_config_t tc={
@@ -115,9 +117,11 @@ static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned fast)
     };
     esp_err_t err=parlio_new_tx_unit(&tc,&tx);
     if (err!=ESP_OK) goto cleanup;
-    err=parlio_tx_unit_decorate_bitscrambler(tx);
-    if (err!=ESP_OK) goto cleanup;
-    decorated=true;
+    if (mode!=1) {
+        err=parlio_tx_unit_decorate_bitscrambler(tx);
+        if (err!=ESP_OK) goto cleanup;
+        decorated=true;
+    }
     const parlio_rx_unit_config_t rc={
         .trans_queue_depth=1,.max_recv_size=4096,.dma_burst_size=32,
         .data_width=8,.clk_src=PARLIO_CLK_SRC_DEFAULT,.exp_clk_freq_hz=40000000,
@@ -142,7 +146,8 @@ static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned fast)
     err=parlio_rx_unit_receive(rx,capture,4096,&receive);
     if (err!=ESP_OK) goto cleanup;
     const parlio_transmit_config_t transmit={.idle_value=20,
-        .bitscrambler_program=c5vrx2_wbfm_linear80_program(),.flags.loop_transmission=true};
+        .bitscrambler_program=mode==1?NULL:mode==2?c5vrx2_wbfm_q4_phase5_program():c5vrx2_wbfm_linear80_program(),
+        .flags.loop_transmission=true};
     err=parlio_tx_unit_transmit(tx,raw,INPUT_BYTES*8,&transmit);
     h[6]=err;
     if (err!=ESP_OK) goto cleanup;
@@ -164,13 +169,13 @@ cleanup:
     if (tx) (void)parlio_del_tx_unit(tx);
     h[8]=err;h[12]=fnv(capture,4096);h[13]=fnv(raw,INPUT_BYTES);
     const esp_partition_t *p=esp_partition_find_first(ESP_PARTITION_TYPE_DATA,0x42,"diagcap");
-    size_t offset=0x12000+fast*0x2000;
+    size_t offset=0x12000+trial*0x2000;
     esp_err_t saved=p?ESP_OK:ESP_ERR_NOT_FOUND;
     if (p && offset+8192>p->size) saved=ESP_ERR_INVALID_SIZE;
     if (saved==ESP_OK) saved=esp_partition_erase_range(p,offset,8192);
     if (saved==ESP_OK) saved=esp_partition_write(p,offset+sizeof(h),capture,4096);
     if (saved==ESP_OK) saved=esp_partition_write(p,offset,h,sizeof(h));
-    c5vrx2_trace_stage_detail(0x860+fast,saved,h[8],h[10],h[12]);
+    c5vrx2_trace_stage_detail(0x860+trial,saved,h[8],h[10],h[12]);
 }
 
 /* Diagnostic-only image copy. IDF 6.0.1 bitscrambler.c defines the v1
@@ -306,8 +311,7 @@ esp_err_t c5vrx2_linear80_oracle_run(void)
     }
     if (saved==ESP_OK) {
         eof_sweep(raw,actual,expected);
-        pad_capture(raw,actual,0);
-        pad_capture(raw,actual,1);
+        for (unsigned trial=0;trial<6;++trial) pad_capture(raw,actual,trial);
     }
     free(raw);free(actual);free(expected);free(base);
     bool failed=h[6]!=0 || h[7]!=0 || h[12]!=0 || h[13]!=0;

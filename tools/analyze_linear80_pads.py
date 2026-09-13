@@ -31,12 +31,20 @@ def analyze(path):
     if fnv(capture)!=h[12]: raise ValueError('capture hash mismatch')
     raw=bytes((i*73+(i>>3)*29+(i>>7)*11+17)&255 for i in range(16384))
     if fnv(raw)!=h[13]: raise ValueError('input pattern hash mismatch')
-    source=(Path(__file__).resolve().parents[1]/'main/c5vrx2_phase5_linear80.bsasm').read_text()
-    # Second full input period has the repeating discriminator/interpolator state.
-    template=simulate(source,raw*3,65536)[32768:65536]
+    mode=h[14]
+    if mode not in (0,1,2): raise ValueError('unsupported replay mode')
+    if mode==1:
+        template=[v&63 for v in raw]
+    else:
+        name='c5vrx2_phase5_linear80.bsasm' if mode==0 else 'c5vrx2_wbfm_q4_phase5_2to1.bsasm'
+        source=(Path(__file__).resolve().parents[1]/'main'/name).read_text()
+        period=32768 if mode==0 else 16384
+        # Second input period retains discriminator/interpolator state.
+        template=simulate(source,raw*3,period*2)[period:period*2]
     valid=all(h[i]==0 for i in (6,7,8))
     return dict(evidence='RF-off repeating input, physical DAC digital pad readback; not RF or analog settling',
                 requested_tx_hz=h[4],requested_rx_hz=h[5],
+                replay_mode=['linear80','direct','phase5'][mode],
                 tx_error=h[6],rx_error=h[7],result=h[8],rx_elapsed_us=h[10],
                 irq_before=h[9],irq_after=h[11],unique_codes=len(set(v&63 for v in capture)),
                 comparison=compare([v&63 for v in capture],template,h[4]//h[5]) if valid else None,

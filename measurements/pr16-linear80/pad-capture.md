@@ -29,3 +29,21 @@ codes to the source-driven steady cyclic reference. It searches cyclic phase,
 not arbitrary stretches of skipped samples. Nonmatching signatures are not
 discarded or marked passing. LED still reflects the original stock-DMA-EOF
 oracle gate, not these separate pad captures. Allow 30 seconds, VTX off.
+
+## Initial physical result (2387411)
+
+Both captures passed payload/input hashes, with TX/RX/setup ESP_OK. RX elapsed
+160 us at requested TX40 and 133 us at TX80. IRQ before=0, after=2.
+Neither captured six-bit sequence matched any exact 16-sample signature of
+the nominal reference (stride 1 and 2 respectively). TX40 contained only 14
+unique codes and a visibly repeating 16-sample pattern; TX80 only 8 codes
+and a visibly repeating 8-sample pattern. This is a FAILED comparison,
+not proof of its cause. Do not infer RF image quality from this test.
+
+Next image adds same-pad direct-byte and Phase5 controls, each TX40/TX80.
+Header word 14 now identifies mode: 0 linear80, 1 direct bytes, 2 Phase5.
+Six records use offsets 0x12000+trial*0x2000 within diagcap, trials 0..5;
+absolute flash addresses 0x124000, 0x126000, 0x128000, 0x12a000, 0x12c000,
+0x12e000. Each record is 4160 bytes. Trace stages 0x860..865. Direct mode
+does not allocate or enable BitScrambler. Reference analysis uses matching
+source programs for each mode and preserves six-bit masking only.
