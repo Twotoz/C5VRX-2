@@ -15,6 +15,7 @@
 #include "soc/parl_io_struct.h"
 #include "calibration.h"
 #include "wbfm_q4.h"
+#include "startup_trace.h"
 
 #define INPUT_BYTES 16384u
 #define OUTPUT_BYTES (INPUT_BYTES * 2u)
@@ -28,7 +29,7 @@ static uint32_t fnv(const void *data, size_t n)
     return h;
 }
 
-static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows)
+static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows, const void *program)
 {
     parlio_tx_unit_handle_t tx=NULL;
     bool decorated=false, enabled=false;
@@ -50,7 +51,7 @@ static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows)
     if (err!=ESP_OK) goto cleanup;
     enabled=true;
     const parlio_transmit_config_t tr={
-        .idle_value=20, .bitscrambler_program=c5vrx2_wbfm_linear80_program(),
+        .idle_value=20, .bitscrambler_program=program,
     };
     for (unsigned run=0;run<4;++run) {
         uint32_t bytes=(run&1)?INPUT_BYTES:INPUT_BYTES/4;
@@ -74,6 +75,54 @@ cleanup:
     if (decorated) (void)parlio_tx_unit_undecorate_bitscrambler(tx);
     (void)parlio_del_tx_unit(tx);
     return err;
+}
+
+/* Diagnostic-only image copy. IDF 6.0.1 bitscrambler.c defines the v1
+ * 12-byte header: trailing_bits at 8, eof_on at 10, nine words/instruction.
+ * Never patch the embedded live program, its instructions, or its LUT.
+ * Each completed trial is durable even if a later trial cannot finish. */
+static void eof_sweep(uint8_t *raw, uint8_t *actual, const uint8_t *expected)
+{
+    const uint8_t *source=c5vrx2_wbfm_linear80_program();
+    if (source[0]!=1 || source[2]!=3 || source[3]!=7) {
+        c5vrx2_trace_stage(0x800,ESP_ERR_INVALID_VERSION);
+        return;
+    }
+    size_t size=source[2]*4u+source[3]*36u+
+                ((unsigned)source[4]+((unsigned)source[5]<<8))*4u;
+    if (size>8192) return;
+    uint8_t *program=malloc(size);
+    if (!program) return;
+    memcpy(program,source,size);
+    const unsigned tails[]={8,9,10,12,16,24,32};
+    for (unsigned trial=0;trial<sizeof(tails)/sizeof(tails[0]);++trial) {
+        unsigned tail=tails[trial];
+        program[8]=(tail*8)&255; program[9]=(tail*8)>>8;
+        bitscrambler_handle_t bs=NULL;
+        size_t written=0;
+        memset(actual,0xa5,OUTPUT_CAPACITY);
+        esp_err_t err=bitscrambler_loopback_create(&bs,SOC_BITSCRAMBLER_ATTACH_I2S0,OUTPUT_CAPACITY);
+        if (err==ESP_OK) err=bitscrambler_load_program(bs,program);
+        if (err==ESP_OK) err=bitscrambler_loopback_run(bs,raw,INPUT_BYTES,actual,OUTPUT_CAPACITY,&written);
+        if (bs) bitscrambler_free(bs);
+        unsigned different=0;
+        for (size_t i=0;i<written && i<OUTPUT_BYTES;++i)
+            different+=actual[i]!=expected[i];
+        c5vrx2_trace_stage_detail(0x810+trial,err,tail,written,different);
+        for (unsigned fast=0;fast<2;++fast) {
+            uint32_t rows[20]; memset(rows,0xff,sizeof(rows));
+            err=timed_tx(raw,fast?80000000:40000000,rows,program);
+            c5vrx2_trace_stage_detail((fast?0x830:0x820)+trial,err,
+                                      tail,rows[2],rows[3]);
+        }
+    }
+    free(program);
+    /* Control uses the existing Phase5 program, not linear80. No rate
+     * inference from its different expansion ratio; test completion only. */
+    uint32_t rows[20]; memset(rows,0xff,sizeof(rows));
+    esp_err_t err=timed_tx(raw,40000000,rows,c5vrx2_wbfm_q4_phase5_program());
+    c5vrx2_trace_stage_detail(0x840,err,40,rows[2],rows[3]);
+    c5vrx2_trace_stage(0x84f,ESP_OK);
 }
 
 esp_err_t c5vrx2_linear80_oracle_run(void)
@@ -120,8 +169,8 @@ esp_err_t c5vrx2_linear80_oracle_run(void)
         h[7]+=OUTPUT_BYTES-count;
         /* Timing runs also execute on a mismatch, to preserve diagnostic
          * evidence; a mismatch is never promoted to a passing live gate. */
-        h[12]=timed_tx(raw,40000000,h+16);
-        h[13]=timed_tx(raw,80000000,h+36);
+        h[12]=timed_tx(raw,40000000,h+16,c5vrx2_wbfm_linear80_program());
+        h[13]=timed_tx(raw,80000000,h+36,c5vrx2_wbfm_linear80_program());
     }
     h[9]=fnv(raw,INPUT_BYTES); h[10]=fnv(actual,OUTPUT_CAPACITY);
     h[11]=fnv(expected,OUTPUT_BYTES); h[15]=OUTPUT_CAPACITY;
@@ -151,6 +200,7 @@ esp_err_t c5vrx2_linear80_oracle_run(void)
         const uint32_t *r=h+16+i*5;
         ESP_LOGW("linear80","rate=%lu input=%lu elapsed_us=%lu mid_irq=0x%lx error=%lu",r[0],r[1],r[2],r[3],r[4]);
     }
+    if (saved==ESP_OK) eof_sweep(raw,actual,expected);
     free(raw);free(actual);free(expected);free(base);
     bool failed=h[6]!=0 || h[7]!=0 || h[12]!=0 || h[13]!=0;
     for (unsigned i=0;i<8;++i) {
