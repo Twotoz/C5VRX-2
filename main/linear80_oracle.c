@@ -98,6 +98,7 @@ static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows, const voi
 static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
 {
     unsigned fast=trial&1u, mode=trial/2u;
+    c5vrx2_trace_stage_detail(0x870+trial,ESP_OK,mode,fast,0);
     parlio_tx_unit_handle_t tx=NULL;
     parlio_rx_unit_handle_t rx=NULL;
     parlio_rx_delimiter_handle_t delimiter=NULL;
@@ -148,6 +149,7 @@ static void pad_capture(uint8_t *raw, uint8_t *capture, unsigned trial)
     const parlio_transmit_config_t transmit={.idle_value=20,
         .bitscrambler_program=mode==1?NULL:mode==2?c5vrx2_wbfm_q4_phase5_program():c5vrx2_wbfm_linear80_program(),
         .flags.loop_transmission=true};
+    c5vrx2_trace_stage_detail(0x880+trial,ESP_OK,mode,fast,0);
     err=parlio_tx_unit_transmit(tx,raw,INPUT_BYTES*8,&transmit);
     h[6]=err;
     if (err!=ESP_OK) goto cleanup;
@@ -252,6 +254,11 @@ esp_err_t c5vrx2_linear80_oracle_run(void)
         free(raw); free(actual); free(expected); free(base); return ESP_ERR_NO_MEM;
     }
     for (size_t i=0;i<INPUT_BYTES;++i) raw[i]=(i*73u+(i>>3)*29u+(i>>7)*11u+17u)&255;
+    /* Direct controls must precede any BitScrambler allocation this boot.
+     * Previous sequential test stopped before direct completion after BS
+     * teardown. Order is deliberate to test that state-leak hypothesis. */
+    const unsigned pad_order[]={2,3,4,5,0,1};
+    for (unsigned i=0;i<6;++i) pad_capture(raw,actual,pad_order[i]);
     c5vrx2_wbfm_q4_phase5_reference(raw,INPUT_BYTES,base,INPUT_BYTES/2);
     unsigned a=0;
     for (size_t i=0;i<INPUT_BYTES/2;++i) {
@@ -311,7 +318,6 @@ esp_err_t c5vrx2_linear80_oracle_run(void)
     }
     if (saved==ESP_OK) {
         eof_sweep(raw,actual,expected);
-        for (unsigned trial=0;trial<6;++trial) pad_capture(raw,actual,trial);
     }
     free(raw);free(actual);free(expected);free(base);
     bool failed=h[6]!=0 || h[7]!=0 || h[12]!=0 || h[13]!=0;

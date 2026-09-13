@@ -47,3 +47,20 @@ absolute flash addresses 0x124000, 0x126000, 0x128000, 0x12a000, 0x12c000,
 0x12e000. Each record is 4160 bytes. Trace stages 0x860..865. Direct mode
 does not allocate or enable BitScrambler. Reference analysis uses matching
 source programs for each mode and preserves six-bit masking only.
+
+## Control-run interruption (ab5ba15)
+
+User observed a continuously lit LED. Recovered trace reaches 0x860/861
+but has no completed direct-byte control (0x862) or later pad trial.
+The two new linear80 records validate their hashes and again fail reference
+alignment (12/8 distinct six-bit codes, RX elapsed 130/127 us). This is not
+a completed successful suite. Exact stopping operation was not instrumented.
+
+Next image runs pad trials in order 2,3,4,5,0,1 before any loopback or EOF
+sweep, so direct bytes run before BitScrambler has ever been allocated that
+boot. This tests a peripheral-state carryover hypothesis, not a proven fix.
+Additional trace markers 0x870+trial mean entry and 0x880+trial mean setup
+finished immediately before calling TX transmit. Both occur before TX starts.
+The expected source pattern, capture format, pin order and comparison stay
+unchanged. Only records with completion markers from this boot are current;
+unreached flash slots can still contain earlier captures.
