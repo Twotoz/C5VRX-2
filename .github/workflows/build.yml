@@ -42,10 +42,37 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install numpy
+      - run: pip install numpy matplotlib
       - run: python tools/validate_trajectory.py
       - run: python tools/validate_phase5_quality.py
+      - run: python tools/validate_linear80.py
       - run: python tools/validate_continuous_pipeline.py
+      - run: python tools/test_issue11_output.py
+      - run: python tools/test_linear80_oracle.py
+
+  linear80-build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    strategy:
+      matrix:
+        mode: [linear80, linear80-oracle]
+        cpu: [160, 240]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build experimental interpolator and RF-off oracle
+        shell: bash
+        run: |
+          source /opt/esp/idf/export.sh
+          defaults="sdkconfig.defaults;sdkconfig.flash40.defaults;sdkconfig.${{ matrix.mode }}.defaults"
+          if [[ "${{ matrix.cpu }}" == "240" ]]; then
+            defaults="$defaults;sdkconfig.cpu240.defaults"
+          fi
+          idf.py -D SDKCONFIG_DEFAULTS="$defaults" build
+          idf.py merge-bin -o "${{ matrix.mode }}-cpu${{ matrix.cpu }}.bin" -f raw
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.mode }}-cpu${{ matrix.cpu }}-experimental
+          path: build/${{ matrix.mode }}-cpu${{ matrix.cpu }}.bin
 
   trajectory-build:
     runs-on: ubuntu-latest

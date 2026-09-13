@@ -13,6 +13,9 @@ idf_component_register(
         "trajectory_reference.c"
         "parlio_direct.c"
         "realtime.c"
+        "issue11_capture.c"
+        "tx_80m_oracle.c"
+        "linear80_oracle.c"
     INCLUDE_DIRS "."
     # diagnostics.c intentionally inspects the C5 PARLIO unit/GDMA handle for
     # byte-exact hardware oracles; this repository is pinned to IDF v6.0.1.
@@ -41,6 +44,7 @@ target_bitscrambler_add_src("c5vrx2_wbfm_q4_fast_2to1.bsasm")
 target_bitscrambler_add_src("c5vrx2_wbfm_q4_lut3_2to1.bsasm")
 target_bitscrambler_add_src("c5vrx2_wbfm_q4_iq5_2to1.bsasm")
 target_bitscrambler_add_src("c5vrx2_wbfm_q4_phase5_2to1.bsasm")
+target_bitscrambler_add_src("c5vrx2_phase5_linear80.bsasm")
 target_bitscrambler_add_src("c5vrx2_phase5_lookup_probe.bsasm")
 target_bitscrambler_add_src("c5vrx2_tx_2to1_probe.bsasm")
 target_bitscrambler_add_src("c5vrx2_q4_phase.bsasm")

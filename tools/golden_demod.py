@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Golden offline FM demodulator for issue #6.
 
 Compares three demodulation strategies on the same frozen Q4/I4 capture:

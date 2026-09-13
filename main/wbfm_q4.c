@@ -28,6 +28,12 @@ BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_q4_iq5_2to1_program,
 BITSCRAMBLER_PROGRAM(c5vrx2_wbfm_q4_phase5_2to1_program,
                     "c5vrx2_wbfm_q4_phase5_2to1");
 BITSCRAMBLER_PROGRAM(c5vrx2_q4_delta_program, "c5vrx2_q4_delta");
+BITSCRAMBLER_PROGRAM(c5vrx2_linear80_program, "c5vrx2_phase5_linear80");
+
+const void *c5vrx2_wbfm_linear80_program(void)
+{
+    return c5vrx2_linear80_program;
+}
 #if CONFIG_C5VRX2_WBFM_SELFTEST_ONCE
 BITSCRAMBLER_PROGRAM(c5vrx2_q4_phase_program, "c5vrx2_q4_phase");
 BITSCRAMBLER_PROGRAM(c5vrx2_q4_negative_program, "c5vrx2_q4_negative");

@@ -69,12 +69,12 @@ def scale_real_sum(value: int, calibration_gain: int = 2) -> int:
     return -((-numerator + 2) // 4) if numerator < 0 else (numerator + 2) // 4
 
 
-def build_lut(calibration_gain: int = 2) -> list[int]:
+def build_lut(calibration_gain: int = 2, pedestal: int = 20) -> list[int]:
     lut = [0] * 1024
     for previous in range(32):
         for current in range(32):
             delta = centroid_delta_phase8(previous, current)
-            code = max(0, min(63, 20 + scale_real_sum(delta, calibration_gain)))
+            code = max(0, min(63, pedestal + scale_real_sum(delta, calibration_gain)))
             lut[(previous << 5) | current] = code
     for packed in range(256):
         lut[packed] |= phase5_state(packed) << 8
@@ -91,16 +91,22 @@ def validate_sources(repo: Path) -> None:
     source = (repo / "main" / "wbfm_q4.c").read_text()
     realtime = (repo / "main" / "realtime.c").read_text()
     defaults = (repo / "sdkconfig.quality.defaults").read_text()
-    # The first read primes the phase LUT once. Thereafter the emit bundle
-    # reads the next pair while writing the preceding pair, leaving exactly
-    # two steady-state bundles per output.
+    # Restored two-bundle baseline: 40 MHz bus, repeated 20 MS/s values.
+    # Check the checked-in assembly, not the abandoned five-bundle algorithm.
     assert asm.count("read 16") == 2
-    assert asm.count("write 8") == 1
-    assert asm.count("set 16 8") == 2
+    assert asm.count("write 16") == 1
     assert "jmp address_delta" in asm
-    assert "set 16 L8" in asm and "set 20 L12" in asm
-    assert "set 21 O8" in asm and "set 25 O12" in asm
-    assert "set 0..5 L0..L5" in asm
+    from bs_model import simulate
+    raw = [(i*37+(i>>2)*19+7)&255 for i in range(32772)]
+    expected = []
+    previous = 0
+    lut = build_lut()
+    for packed in raw[1::2]:
+        current = phase5_state(packed)
+        code = lut[(previous<<5)|current]&63
+        expected.extend([code,code])
+        previous = current
+    assert simulate(asm,raw,len(expected)) == expected
     assert "lut " + " ".join(map(str, build_lut())) in asm
     assert "q4_phase5" in source
     assert "q4_phase5_state" in source
@@ -172,6 +178,7 @@ def main() -> int:
     output_codes = sorted({value & 0x3F for value in lut})
     assert len(output_codes) >= 32
 
+
     print("five-bit polar WBFM quality validation PASS")
     print(f"  Q3/I2 Cartesian phase error: {cartesian_rms:.2f} deg RMS, "
           f"{cartesian_max:.2f} deg max")
@@ -180,7 +187,65 @@ def main() -> int:
     print(f"  centroid delta DAC levels:    {len(output_codes)}")
     print("  circular phase states:        32/32 preserved")
     print("  all 1024 dual-purpose LUT entries and modulo wrap verified")
+    print("  actual assembly verified: repeated 20 MS/s values on 40 MHz bus")
     return 0
+
+
+def validate_reconstruction_simulation(lut: list[int]) -> None:
+    """Historical arithmetic example for the reverted core; not a source validator."""
+    test_iq = [(i * 37 + (i >> 2) * 19 + 7) & 0xFF for i in range(256)]
+    expected = []
+    prev_p = 0
+    prev_dac = 0
+    for packed in test_iq:
+        curr_p = (lut[packed] >> 8) & 0x1F
+        dac = lut[(prev_p << 5) | curr_p] & 0x3F
+        mid = (prev_dac + dac + 1) // 2
+        expected.extend([prev_dac, mid])
+        prev_dac = dac
+        prev_p = curr_p
+
+    O = 0
+    ctra = 1
+    simulated = []
+
+    def get_bits(val: int, low: int, high: int) -> int:
+        mask = (1 << (high - low + 1)) - 1
+        return (val >> low) & mask
+
+    for packed in test_iq:
+        a_from_prev_b = get_bits(O, 16, 21)
+        p_prev = get_bits(O, 26, 30)
+        lut_addr_phase = packed
+        new_O = (a_from_prev_b & 0x3F) | ((lut_addr_phase & 0xFF) << 16) | ((p_prev & 0x1F) << 26)
+        ctra = 1
+        O = new_O
+        lut_out = lut[lut_addr_phase]
+
+        p_curr = (lut_out >> 8) & 0x1F
+        a_val = get_bits(O, 0, 5)
+        new_O = (a_val & 0x3F) | ((p_curr & 0x1F) << 16) | ((p_prev & 0x1F) << 21) | ((p_curr & 0x1F) << 26)
+        O = new_O
+        lut_addr_dac = (p_prev << 5) | p_curr
+        lut_out = lut[lut_addr_dac]
+
+        dac_b = lut_out & 0x3F
+        new_O = (a_val & 0x3F) | ((dac_b & 0x3F) << 6) | ((a_val & 0x3F) << 16) | ((p_curr & 0x1F) << 26)
+        ctra = (ctra + a_val) & 0xFFFF
+        O = new_O
+
+        new_O = (a_val & 0x3F) | ((dac_b & 0x3F) << 6) | ((dac_b & 0x3F) << 16) | ((p_curr & 0x1F) << 26)
+        ctra = (ctra + dac_b) & 0xFFFF
+        O = new_O
+
+        midpoint = get_bits(ctra, 1, 6)
+        byte0 = a_val & 0x3F
+        byte1 = midpoint & 0x3F
+        simulated.extend([byte0, byte1])
+        new_O = byte0 | (byte1 << 8) | ((dac_b & 0x3F) << 16) | ((p_curr & 0x1F) << 26)
+        O = new_O
+
+    assert simulated == expected, "BitScrambler simulation output differs from analytical [A, round((A+B)/2)]"
 
 
 if __name__ == "__main__":

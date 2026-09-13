@@ -103,7 +103,7 @@ esp_err_t c5vrx2_wifi5_start_a1(void)
         .ghz_5g = WIFI_BW40,
     };
     continuous_iq_debug_mark(310u);
-    ESP_LOGI(TAG, "startup 310: esp_wifi_set_bandwidths");
+    ESP_LOGI(TAG, "startup 310: esp_wifi_set_bandwidths(WIFI_BW40)");
     err = esp_wifi_set_bandwidths(WIFI_IF_STA, &bandwidths);
     if (err != ESP_OK) {
         bandwidths.ghz_5g = WIFI_BW20;

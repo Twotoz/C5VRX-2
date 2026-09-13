@@ -1,4 +1,5 @@
 #pragma once
+const void *c5vrx2_wbfm_linear80_program(void);
 
 #include <stddef.h>
 #include <stdint.h>

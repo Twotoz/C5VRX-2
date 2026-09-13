@@ -12,6 +12,15 @@
 #include "rf_dump.h"
 #include "startup_trace.h"
 #include "wbfm_q4.h"
+#include "tx_80m_oracle.h"
+#if CONFIG_C5VRX2_MODE_LINEAR80_ORACLE
+esp_err_t c5vrx2_linear80_oracle_run(void);
+#endif
+
+#if CONFIG_C5VRX2_ISSUE11_CAPTURE
+#include <stdio.h>
+esp_err_t c5vrx2_issue11_capture(void);
+#endif
 
 static const char *TAG = "c5vrx2";
 
@@ -81,6 +90,12 @@ void app_main(void)
     if (err != ESP_OK) ESP_LOGE(TAG, "PAL diagnostic failed: %s",
                                 esp_err_to_name(err));
     return;
+#elif CONFIG_C5VRX2_MODE_TX_80M_ORACLE
+    ESP_LOGW(TAG, "C5VRX-2: PARLIO TX 80 MHz hardware oracle boot");
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    const esp_err_t err = c5vrx2_tx_80m_oracle_run();
+    if (err != ESP_OK) ESP_LOGE(TAG, "80M oracle failed: %s", esp_err_to_name(err));
+    return;
 #else
     ESP_LOGW(TAG, "C5VRX-2: direct TX-BitScrambler WBFM receiver boot");
 
@@ -139,6 +154,22 @@ void app_main(void)
     return;
 #endif
 
+#if CONFIG_C5VRX2_MODE_LINEAR80_ORACLE
+    err = c5vrx2_linear80_oracle_run();
+    gpio_set_level(XIAO_USER_LED, err == ESP_OK ? 0 : 1);
+    ESP_LOGW(TAG, "LINEAR80 ORACLE COMPLETE: %s; RF remained off",esp_err_to_name(err));
+    /* This diagnostic is one-shot, not a receiver. Keep failure visibly
+     * distinguishable from power loss, without repeating tests/flash writes. */
+    for (;;) {
+        if (err != ESP_OK) {
+            gpio_set_level(XIAO_USER_LED, 0);
+            vTaskDelay(pdMS_TO_TICKS(150));
+            gpio_set_level(XIAO_USER_LED, 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1850));
+    }
+#endif
+
     err = c5vrx2_wifi5_start_a1();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "A1 RF init failed: %s", esp_err_to_name(err));
@@ -151,7 +182,26 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(1000));
     c5vrx2_trace_stage(3u, ESP_OK);
 
-#if CONFIG_C5VRX2_MODE_RF_ORACLE
+#if CONFIG_C5VRX2_ISSUE11_CAPTURE
+    ESP_LOGW(TAG, "ISSUE11 READY: countdown 3 seconds before capture...");
+    for (int i = 0; i < 3; ++i) {
+        gpio_set_level(XIAO_USER_LED, 0); /* LED on */
+        vTaskDelay(pdMS_TO_TICKS(200));
+        gpio_set_level(XIAO_USER_LED, 1); /* LED off */
+        vTaskDelay(pdMS_TO_TICKS(800));
+    }
+    gpio_set_level(XIAO_USER_LED, 0); /* LED on during capture */
+    err = c5vrx2_issue11_capture();
+    gpio_set_level(XIAO_USER_LED, 1); /* LED off */
+    for (int i = 0; i < 10; ++i) {
+        gpio_set_level(XIAO_USER_LED, 0);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level(XIAO_USER_LED, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(TAG, "ISSUE11 CAPTURE COMPLETE (err=%s). VTX can be turned off now.", esp_err_to_name(err));
+    for (;;) vTaskDelay(portMAX_DELAY);
+#elif CONFIG_C5VRX2_MODE_RF_ORACLE
     err = c5vrx2_rf_oracle_diagnostic_start();
 #elif CONFIG_C5VRX2_MODE_RF_WRAP
     err = c5vrx2_rf_wrap_diagnostic_run();
