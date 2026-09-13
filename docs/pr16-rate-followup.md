@@ -65,3 +65,14 @@ uses full-byte I2S-triggered BitScrambler loopback, then decorated PARLIO timing
 at 40/80 MHz with two input lengths and mid-transmission FIFO snapshots. RF
 stays off. It stores all output/reference bytes and verifies flash readback.
 Even a passing oracle does not establish loaded analog settling at 12.5 ns.
+
+Synthetic coherent 3.5791015625 MHz, pedestal 20/amplitude 8-code test:
+first image changes from -12.65 dBc (held 20 MS/s) to -25.22 dBc (linear 80 MS/s),
+12.57 dB additional suppression. Fundamental changes by -0.433 dB, mean by
+-0.223 code due to flooring. Reproduce with `tools/report_linear80_spectrum.py`.
+This demonstrates the intended interpolation tradeoff, not actual RF quality.
+
+An optional `sdkconfig.cpu240.defaults` supports a 160/240 MHz CPU A/B. There
+is no per-sample CPU work in either profile. A higher CPU setting must not be
+reported as a higher BitScrambler clock without measurement. CI builds live
+and oracle variants at both settings. Keep the VTX off for these oracle runs.
