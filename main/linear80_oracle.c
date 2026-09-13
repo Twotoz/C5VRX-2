@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "soc/soc_caps.h"
 #include "soc/parl_io_struct.h"
+#include "hal/parlio_ll.h"
 #include "calibration.h"
 #include "wbfm_q4.h"
 #include "startup_trace.h"
@@ -29,7 +30,7 @@ static uint32_t fnv(const void *data, size_t n)
     return h;
 }
 
-static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows, const void *program)
+static esp_err_t timed_tx_mode(uint8_t *raw, uint32_t rate, uint32_t *rows, const void *program, bool counted_eof)
 {
     parlio_tx_unit_handle_t tx=NULL;
     bool decorated=false, enabled=false;
@@ -61,6 +62,14 @@ static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows, const voi
         int64_t start=esp_timer_get_time();
         err=parlio_tx_unit_transmit(tx,raw,bytes*8u,&tr);
         if (err==ESP_OK) {
+            /* Diagnostic only: IDF selects DMA EOF when starting TX. Test
+             * explicit expanded-output length instead. No DMA input-length
+             * inflation, no fabricated completion callback. Set length first.
+             * The regular gate above/below retains the stock driver path. */
+            if (counted_eof) {
+                parlio_ll_tx_set_trans_bit_len(&PARL_IO,bytes*16u);
+                parlio_ll_tx_set_eof_condition(&PARL_IO,PARLIO_LL_TX_EOF_COND_DATA_LEN);
+            }
             /* Observe the sticky FIFO flag during, not after, the stream.
              * No USB/logging or buffer inspection during transmission. */
             esp_rom_delay_us((uint64_t)bytes*1000000u/rate);
@@ -75,6 +84,11 @@ cleanup:
     if (decorated) (void)parlio_tx_unit_undecorate_bitscrambler(tx);
     (void)parlio_del_tx_unit(tx);
     return err;
+}
+
+static esp_err_t timed_tx(uint8_t *raw, uint32_t rate, uint32_t *rows, const void *program)
+{
+    return timed_tx_mode(raw,rate,rows,program,false);
 }
 
 /* Diagnostic-only image copy. IDF 6.0.1 bitscrambler.c defines the v1
@@ -122,6 +136,14 @@ static void eof_sweep(uint8_t *raw, uint8_t *actual, const uint8_t *expected)
     uint32_t rows[20]; memset(rows,0xff,sizeof(rows));
     esp_err_t err=timed_tx(raw,40000000,rows,c5vrx2_wbfm_q4_phase5_program());
     c5vrx2_trace_stage_detail(0x840,err,40,rows[2],rows[3]);
+    for (unsigned fast=0;fast<2;++fast) {
+        memset(rows,0xff,sizeof(rows));
+        err=timed_tx_mode(raw,fast?80000000:40000000,rows,source,true);
+        for (unsigned run=0;run<4;++run) {
+            uint32_t *r=rows+run*5;
+            c5vrx2_trace_stage_detail(0x850+fast*4+run,(esp_err_t)r[4],r[1],r[2],r[3]);
+        }
+    }
     c5vrx2_trace_stage(0x84f,ESP_OK);
 }
 

@@ -29,3 +29,25 @@ No timing rate can be inferred from a failed transaction. Each trace write
 occurs after peripheral cleanup, outside measured transmission. The LED
 continues to describe the original strict L80O test result, not the sweep.
 Allow 30 seconds after boot; VTX stays off throughout.
+
+## Physical sweep result
+
+All seven loopback trials returned ESP_OK, with zero differing received
+reference bytes. Tail 8/9 produced 32764 bytes; 10 produced exactly 32768;
+12/16/24/32 produced 32772/32780/32796/32812 respectively. Tail 10 is now
+selected for the embedded program. This fixes the finite loopback shortfall,
+not the remaining TX issue.
+
+Every linear80 finite TX trial timed out at both 40 and 80 MHz, with zero
+midstream IRQ snapshots. Phase5 TX40 control completed successfully; first
+transaction elapsed 707 us. End marker 0x84f was present. Thus the stock
+test can complete for Phase5, but no linear80 throughput has been measured.
+
+Next diagnostic additionally switches PARLIO to DATA_LEN EOF immediately
+after transmit starts, setting the expanded output length to input_bytes*16
+bits. This is isolated to the oracle and is NOT a live driver workaround.
+Stages 0x850..853 are four TX40 transactions; 0x854..857 are TX80.
+Details: input bytes, elapsed us, midstream IRQ; record error is the transfer
+error (0xffffffff means unexecuted). The normal L80O gate still tests the
+unmodified driver EOF path. A completion here would identify an EOF-mode
+dependency, not establish correct physical DAC bytes or gapless operation.
