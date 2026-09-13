@@ -51,3 +51,33 @@ Details: input bytes, elapsed us, midstream IRQ; record error is the transfer
 error (0xffffffff means unexecuted). The normal L80O gate still tests the
 unmodified driver EOF path. A completion here would identify an EOF-mode
 dependency, not establish correct physical DAC bytes or gapless operation.
+
+## Physical counted-EOF result (81494e3)
+
+All eight explicit DATA_LEN trials returned ESP_OK, with zero midstream IRQ
+snapshots. Elapsed times include software setup and task wake-up:
+
+| Requested clock | Input bytes | Elapsed us |
+| --- | --- | --- |
+| 40 MHz | 4096 | 924 |
+| 40 MHz | 16384 | 1461 |
+| 40 MHz | 4096 | 715 |
+| 40 MHz | 16384 | 1338 |
+| 80 MHz | 4096 | 779 |
+| 80 MHz | 16384 | 1048 |
+| 80 MHz | 4096 | 634 |
+| 80 MHz | 16384 | 921 |
+
+The same boot reproduced every DMA-EOF timeout in the sweep. Phase5 TX40
+control completed (first elapsed 701 us). Tail 10 again produced exactly
+32768 matching loopback bytes. End marker 0x84f present.
+
+This establishes finite-transmission completion depends on EOF mode for this
+program/setup. It does not prove why the DMA EOF signal fails, nor prove
+continuous live throughput, pin-level byte correctness or analog settling.
+In particular the CPU wall-time slopes are noisy and must not be promoted
+to precise sample rates. The regular stock-driver L80O gate remains failed.
+Next validation should observe the actual DAC bus and transmission timing,
+then test simultaneous continuous RX/TX; do not insert finite DSP resets
+into the live path. Raw recovery files remain in the local measurements directory:
+`eof-counted-trace.bin` and `oracle160-tail10-counted.bin`.
