@@ -99,5 +99,43 @@ Analysis of the 12,000 samples (nominal NTSC line length = 63.555 µs / 1271.11 
      images from 16.42 MHz to 36.42 MHz.
    - See [diagnostic-led-firmware.md](diagnostic-led-firmware.md) for full diagnostic capture
      firmware implementation, LED signaling protocol, mathematical derivations, and Section 7
-     for physical hardware verification results (elimination of static, solid color lock, and
-     confirmation of halved 25 ns sawtooth amplitude).
+     for physical hardware verification results.
+
+## 6. True 40 MS/s DAC Reconstruction: Dynamic Midpoint [A, round((A+B)/2)]
+
+### 6.1 The [A, A] Duplicate Hold Diagnosis
+While PARLIO TX clocked at 40 MHz (25 ns per byte), the initial dual-byte emission emitted
+identical DAC codes in Byte 0 and Byte 1:
+```text
+Byte 0: DAC[n]
+Byte 1: DAC[n] (duplicate!)
+Analog voltage: A ───────── B ───────── C (held for 50 ns)
+```
+Because the physical resistor ladder voltage was held constant across both 25 ns intervals,
+the zero-order hold (ZOH) stair-step duration remained 50 ns, leaving the visible edge
+"teeth" unchanged from 20 MS/s.
+
+### 6.2 Bit-Exact BitScrambler ALU Midpoint Pipeline
+True 40 MS/s reconstruction was implemented in `main/c5vrx2_wbfm_q4_phase5_2to1.bsasm` without
+modifying or degrading the proven Phase 5 polar demodulator, circular centroids, or the
+16-bit dual-purpose LUT.
+
+Using a 1-sample pipelined delay, when new DAC sample $B$ is looked up and previous DAC
+sample $A$ is retained, the BitScrambler Counter A ALU computes:
+$$\text{Byte 0} = A, \quad \text{Byte 1} = \text{round}\left(\frac{A + B}{2}\right) = (A + B + 1) \gg 1$$
+
+The 5-instruction steady-state loop:
+1. `step_phase`: reads 16b IQ from DMA, addresses Phase LUT, preloads Counter A with 1 (`LDCTDAL 1`), copies previous $B$ to $A$.
+2. `step_dac`: addresses DAC LUT with $(P_{prev}, P_{curr})$.
+3. `step_add_a`: latches new DAC $B$, routes $A$ to bits 16..21, runs `ADDCTIAL` (Counter A = $1 + A$).
+4. `step_add_b`: routes $B$ to bits 16..21, runs `ADDCTIAL` (Counter A = $1 + A + B$).
+5. `step_emit`: emits `Byte 0 = A` (`O0..O5`), `Byte 1 = (A + B + 1) >> 1` (`A1..A6`), stashes $B$ in `O16..O21` for next cycle, `write 16`, `jmp step_phase`.
+
+Result: The analog resistor DAC voltage physically updates every **25 ns** ($A \to (A+B)/2 \to B \to (B+C)/2$),
+halving the discrete stair-step jump height and eliminating 50 ns ZOH hold artifacts.
+
+### 6.3 Next Phase: 80 MS/s Decoupled Rate Expansion Roadmap
+For higher spatial fidelity (12.5 ns time grid, 22.3 samples/color cycle):
+- **Decouple demodulation rate from DAC clock**: RF demodulator stays at 40 MS/s IQ coherence.
+- **2× expansion in BitScrambler FIFO**: BitScrambler reads 16 bits (`read 16` per 50 ns) and emits 32 bits (`write 32`), packing 4 interpolated samples $[S_0, S_1, S_2, S_3]$ ($A \to 25\% \to 50\% \to 75\% \to B$).
+- **PARLIO TX @ 80 MHz**: Serializes the 32-bit output words at 80 MHz (PLL_F240M / 3 = 80 MHz).

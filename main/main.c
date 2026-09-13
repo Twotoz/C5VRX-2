@@ -12,6 +12,7 @@
 #include "rf_dump.h"
 #include "startup_trace.h"
 #include "wbfm_q4.h"
+#include "tx_80m_oracle.h"
 
 #if CONFIG_C5VRX2_ISSUE11_CAPTURE
 #include <stdio.h>
@@ -85,6 +86,12 @@ void app_main(void)
         colour);
     if (err != ESP_OK) ESP_LOGE(TAG, "PAL diagnostic failed: %s",
                                 esp_err_to_name(err));
+    return;
+#elif CONFIG_C5VRX2_MODE_TX_80M_ORACLE
+    ESP_LOGW(TAG, "C5VRX-2: PARLIO TX 80 MHz hardware oracle boot");
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    const esp_err_t err = c5vrx2_tx_80m_oracle_run();
+    if (err != ESP_OK) ESP_LOGE(TAG, "80M oracle failed: %s", esp_err_to_name(err));
     return;
 #else
     ESP_LOGW(TAG, "C5VRX-2: direct TX-BitScrambler WBFM receiver boot");

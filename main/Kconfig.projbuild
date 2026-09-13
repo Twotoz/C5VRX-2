@@ -42,6 +42,9 @@ choice C5VRX2_MODE
 
     config C5VRX2_MODE_AV_PAL_COLOR
         bool "AV synthetic PAL colour bars"
+
+    config C5VRX2_MODE_TX_80M_ORACLE
+        bool "PARLIO TX 80 MHz hardware timing and loopback oracle"
 endchoice
 
 config C5VRX2_AV_STATIC_CODE
