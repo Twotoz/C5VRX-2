@@ -7,8 +7,8 @@ from pathlib import Path
 from analyze_issue11_output import fnv
 
 
-def analyze(path):
-    data=path.read_bytes()
+def analyze(path, offset=0):
+    data=path.read_bytes()[offset:]
     if len(data)<256: raise ValueError('truncated L80O header')
     h=struct.unpack('<64I',data[:256])
     if h[:3]!=(0x4f30384c,1,256): raise ValueError('not an L80O v1 record')
@@ -30,6 +30,10 @@ def analyze(path):
     slopes=[]
     for i in (0,2,4,6):
         small,large=rows[i:i+2]
+        if small['error']!=0 or large['error']!=0:
+            slopes.append(dict(rate_hz=small['rate_hz'],incremental_output_MBps=None,
+                               within_15_percent=False,reason='transfer failed or was not executed'))
+            continue
         dt=large['elapsed_us']-small['elapsed_us']
         measured=2*(large['input_bytes']-small['input_bytes'])/dt if dt>0 else None
         target=large['rate_hz']/1e6
@@ -42,6 +46,7 @@ def analyze(path):
                 sha256=hashlib.sha256(data).hexdigest(), cpu_hz=h[14],
                 loop_error=h[6],bytes_written=h[5],expected_bytes=h[4],
                 mismatches=mismatch,first_mismatches=differences[:32],
+                differing_received_bytes=len(differences),missing_bytes=h[4]-count,
                 trailing_bytes=max(0,h[5]-h[4]),
                 timing=rows,incremental_timing=slopes,
                 basic_hardware_gate_pass=passed)
@@ -50,5 +55,7 @@ def analyze(path):
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('capture',type=Path)
+    p.add_argument('--offset',type=lambda s:int(s,0),default=0,
+                   help='record offset within flash dump (e.g. 0x1000 after trace partition)')
     a=p.parse_args()
-    print(json.dumps(analyze(a.capture),indent=2))
+    print(json.dumps(analyze(a.capture,a.offset),indent=2))

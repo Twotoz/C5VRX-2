@@ -37,5 +37,19 @@ class OracleParserTests(unittest.TestCase):
                 p.write_bytes(data)
                 with self.assertRaises(ValueError): analyze(p)
 
+    def test_hardware_short_output_and_timeout(self):
+        data=bytearray(self.fixture())
+        struct.pack_into('<I',data,5*4,32764)
+        struct.pack_into('<I',data,7*4,4)
+        struct.pack_into('<I',data,20*4,0x107)
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'flash.bin'
+            p.write_bytes(bytes(4096)+data)
+            result=analyze(p,4096)
+            self.assertEqual(result['missing_bytes'],4)
+            self.assertEqual(result['differing_received_bytes'],0)
+            self.assertIsNone(result['incremental_timing'][0]['incremental_output_MBps'])
+            self.assertFalse(result['basic_hardware_gate_pass'])
+
 
 if __name__=='__main__': unittest.main()
