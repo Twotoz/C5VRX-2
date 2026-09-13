@@ -91,18 +91,22 @@ def validate_sources(repo: Path) -> None:
     source = (repo / "main" / "wbfm_q4.c").read_text()
     realtime = (repo / "main" / "realtime.c").read_text()
     defaults = (repo / "sdkconfig.quality.defaults").read_text()
-    # True 40 MS/s reconstructed quality Phase 5 core:
-    # 5-instruction steady-state pipeline reads 16 bits of IQ, looks up polar Phase 5,
-    # looks up DAC code B, computes rounded midpoint (A + B + 1) >> 1 via Counter A ALU,
-    # and emits [A, round((A+B)/2)] via write 16.
-    assert asm.count("read 16") == 1
+    # Restored two-bundle baseline: 40 MHz bus, repeated 20 MS/s values.
+    # Check the checked-in assembly, not the abandoned five-bundle algorithm.
+    assert asm.count("read 16") == 2
     assert asm.count("write 16") == 1
-    assert "jmp step_phase" in asm
-    assert "LDCTDAL 1" in asm
-    assert "ADDCTIAL" in asm
-    assert "set 0..5 O0..O5" in asm
-    assert "set 8..13 A1..A6" in asm
-    assert "set 16..20 L8..L12" in asm and "set 21..25 O26..O30" in asm
+    assert "jmp address_delta" in asm
+    from bs_model import simulate
+    raw = [(i*37+(i>>2)*19+7)&255 for i in range(32772)]
+    expected = []
+    previous = 0
+    lut = build_lut()
+    for packed in raw[1::2]:
+        current = phase5_state(packed)
+        code = lut[(previous<<5)|current]&63
+        expected.extend([code,code])
+        previous = current
+    assert simulate(asm,raw,len(expected)) == expected
     assert "lut " + " ".join(map(str, build_lut())) in asm
     assert "q4_phase5" in source
     assert "q4_phase5_state" in source
@@ -174,7 +178,6 @@ def main() -> int:
     output_codes = sorted({value & 0x3F for value in lut})
     assert len(output_codes) >= 32
 
-    validate_reconstruction_simulation(lut)
 
     print("five-bit polar WBFM quality validation PASS")
     print(f"  Q3/I2 Cartesian phase error: {cartesian_rms:.2f} deg RMS, "
@@ -184,11 +187,12 @@ def main() -> int:
     print(f"  centroid delta DAC levels:    {len(output_codes)}")
     print("  circular phase states:        32/32 preserved")
     print("  all 1024 dual-purpose LUT entries and modulo wrap verified")
-    print("  true 40 MS/s BitScrambler reconstruction verified bit-exact")
+    print("  actual assembly verified: repeated 20 MS/s values on 40 MHz bus")
     return 0
 
 
 def validate_reconstruction_simulation(lut: list[int]) -> None:
+    """Historical arithmetic example for the reverted core; not a source validator."""
     test_iq = [(i * 37 + (i >> 2) * 19 + 7) & 0xFF for i in range(256)]
     expected = []
     prev_p = 0

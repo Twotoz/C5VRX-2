@@ -62,7 +62,7 @@ address_delta:
 emit:
     # Second lookup's low six bits are the complete calibrated DAC code (L0..L5).
     # Emit two 8-bit DAC samples at 40 MS/s: Byte 0 (bits 0..5) and
-    # Byte 1 (bits 8..13), halving the discrete ZOH step duration to 25 ns.
+    # Byte 1 (bits 8..13). Identical bytes retain a 50 ns analog hold.
     set 0..5 L0..L5,
     set 6..7 L,
     set 8..13 L0..L5,

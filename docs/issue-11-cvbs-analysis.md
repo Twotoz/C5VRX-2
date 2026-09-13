@@ -1,5 +1,9 @@
 # Issue 11: 20 MS/s CVBS stream analysis and timing proof
 
+> Historical report. Several conclusions below overstate the evidence; see
+> [PR16 follow-up corrections](pr16-rate-followup.md). Frozen replay does not
+> measure live RX/TX continuity, and duplicated DAC bytes do not interpolate.
+
 This document records the physical measurement and analysis of the 20 MS/s
 digital CVBS stream immediately before the resistor DAC on the ESP32-C5.
 
