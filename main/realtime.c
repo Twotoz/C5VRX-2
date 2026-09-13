@@ -26,7 +26,13 @@
 #include "wbfm_q4.h"
 
 #define MODEM_IQ_RATE_HZ 40000000u
+#if CONFIG_C5VRX2_LINEAR80
+#define CVBS_RATE_HZ     80000000u
+#elif CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
 #define CVBS_RATE_HZ     40000000u
+#else
+#define CVBS_RATE_HZ     20000000u
+#endif
 #define RAW_BLOCK_BYTES      4096u
 #define RAW_RING_BLOCKS         4u
 #define RAW_RING_BYTES (RAW_BLOCK_BYTES * RAW_RING_BLOCKS)
@@ -217,7 +223,9 @@ static esp_err_t start_tx_ring(void)
     const parlio_transmit_config_t cfg = {
         .idle_value = cal->pedestal_code,
         .bitscrambler_program =
-#if CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
+#if CONFIG_C5VRX2_LINEAR80
+            c5vrx2_wbfm_linear80_program(),
+#elif CONFIG_C5VRX2_WBFM_PHASE5_QUALITY
             c5vrx2_wbfm_q4_phase5_program(),
 #elif CONFIG_C5VRX2_WBFM_TRAJECTORY
             c5vrx2_wbfm_q4_trajectory_program(),
@@ -246,9 +254,9 @@ static void telemetry_task(void *argument)
          * scans or copies the DMA ring: USB/logging cannot contend for its
          * SRAM bandwidth or become part of realtime pacing. */
         ESP_LOGI(TAG,
-                 "LIVE raw_in=40M tx_bs_out=40M ptr=%u enable=%u done=%u "
+                 "LIVE configured_iq_hz=40000000 configured_dac_hz=%u ptr=%u enable=%u done=%u "
                  "stalls=%u starts=1 rearms=0",
-                 (unsigned)current, (control & CTRL_ENABLE) != 0u,
+                 (unsigned)CVBS_RATE_HZ, (unsigned)current, (control & CTRL_ENABLE) != 0u,
                  (control & CTRL_DONE) != 0u, (unsigned)stalls);
     }
 }
@@ -385,10 +393,9 @@ esp_err_t c5vrx2_realtime_start(void)
              "GDMA/flash; WBFM and DAC bypassed");
 #else
     ESP_LOGW(TAG,
-             "LIVE ACTIVE: MODEM 80M -> coherent /2 Q4/I4 40M -> Phase 5 "
-             "WBFM -> CVBS 40M -> 6-bit DAC; measured_rf=%u "
+             "LIVE ACTIVE: configured IQ=40000000 DAC=%u Hz; RF estimator=%u "
              "pedestal=%u gain=%u polarity=%u",
-             (unsigned)continuous_iq_sample_rate_hz(),
+             (unsigned)CVBS_RATE_HZ, (unsigned)continuous_iq_sample_rate_hz(),
              cal->pedestal_code, cal->discriminator_gain,
              (unsigned)cal->polarity);
 #endif

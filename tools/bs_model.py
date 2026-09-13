@@ -28,9 +28,11 @@ def parse(text):
     return cfg, lut, blocks, labels
 
 
-def simulate(text, raw, count):
+def simulate(text, raw, count, *, initial=None, start=None):
     cfg, lut, blocks, labels = parse(text)
     out = a = b = look = pos = pc = 0
+    if initial is not None: out, a, b, look = initial
+    if start is not None: pc = labels[start]
     result = []
     def expand(token):
         if '..' not in token: return [token]

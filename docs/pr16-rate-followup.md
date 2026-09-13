@@ -40,3 +40,28 @@ Keep the full Phase5 centroid LUT, raw 40 MB/s ring transport and fixed
 gain=2/pedestal=20. Calculate interpolation inside BitScrambler with no CPU DSP.
 Validate actual assembly arithmetic and then decorated FIFO/throughput on C5;
 do not infer the bundle budget from the configured output rate alone.
+
+## 80 MS/s candidate
+
+`c5vrx2_phase5_linear80.bsasm` retains the original 1024x16 LUT and produces
+`[A, floor((3A+B)/4), floor((A+B)/2), floor((A+3B)/4)]`. Counter A contains
+two independent byte sums; their maxima are 252, so no inter-byte carry can
+corrupt the weighted values. Counter B retains the phase across output and
+ring boundaries. There is one prime plus six repeating bundles, not four.
+No CPU processing, extra realtime SRAM ring, RX rearm, or pin-order change.
+
+`validate_linear80.py` executes actual assembly and verifies all 4096 DAC
+endpoint pairs plus 131080 outputs across four original 16 KiB boundaries.
+All 64 DAC levels occur; all 34 original Phase5 target levels remain unchanged.
+Flooring interpolation has less than one DAC code error, no overshoot, and
+preserves constant levels. The causal reconstruction adds one 20 MS/s interval
+of delay and attenuates some high-frequency content; it cannot recover lost RF
+information or guarantee gray/color-static elimination.
+
+The IDF v6.0.1 assembler accepts the program and the live candidate builds.
+**Hardware throughput is not yet proven.** Enable with
+`sdkconfig.linear80.defaults` only after the dedicated oracle passes. The oracle
+uses full-byte I2S-triggered BitScrambler loopback, then decorated PARLIO timing
+at 40/80 MHz with two input lengths and mid-transmission FIFO snapshots. RF
+stays off. It stores all output/reference bytes and verifies flash readback.
+Even a passing oracle does not establish loaded analog settling at 12.5 ns.

@@ -45,6 +45,9 @@ choice C5VRX2_MODE
 
     config C5VRX2_MODE_TX_80M_ORACLE
         bool "PARLIO TX 80 MHz hardware timing and loopback oracle"
+
+    config C5VRX2_MODE_LINEAR80_ORACLE
+        bool "Bounded Phase5 interpolator byte/FIFO/throughput oracle (RF off)"
 endchoice
 
 config C5VRX2_AV_STATIC_CODE
@@ -57,6 +60,15 @@ config C5VRX2_ISSUE11_CAPTURE
     bool "Issue 11 bounded RF acquisition and actual PR10 DAC replay capture"
     depends on C5VRX2_MODE_LIVE
     default n
+
+config C5VRX2_LINEAR80
+    bool "Experimental Phase5 four-point reconstruction at 80 MS/s"
+    depends on C5VRX2_MODE_LIVE
+    default n
+    help
+        Preserve 40 MB/s raw input and the complete Phase5 centroid table.
+        Six BitScrambler bundles produce four distinct interpolation points
+        per 50 ns. Requires hardware throughput/FIFO validation before use.
 
 config C5VRX2_LIVE_SNAPSHOT_ONCE
     bool "Persist one live raw Q4/I4 ring for offline diagnosis"

@@ -13,6 +13,9 @@
 #include "startup_trace.h"
 #include "wbfm_q4.h"
 #include "tx_80m_oracle.h"
+#if CONFIG_C5VRX2_MODE_LINEAR80_ORACLE
+esp_err_t c5vrx2_linear80_oracle_run(void);
+#endif
 
 #if CONFIG_C5VRX2_ISSUE11_CAPTURE
 #include <stdio.h>
@@ -149,6 +152,13 @@ void app_main(void)
     if (err != ESP_OK) report_fatal_forever("tx_wbfm_test", err);
     ESP_LOGW(TAG, "TX WBFM hardware test passed and was persisted");
     return;
+#endif
+
+#if CONFIG_C5VRX2_MODE_LINEAR80_ORACLE
+    err = c5vrx2_linear80_oracle_run();
+    gpio_set_level(XIAO_USER_LED, err == ESP_OK ? 0 : 1);
+    ESP_LOGW(TAG, "LINEAR80 ORACLE COMPLETE: %s; RF remained off",esp_err_to_name(err));
+    for (;;) vTaskDelay(portMAX_DELAY);
 #endif
 
     err = c5vrx2_wifi5_start_a1();

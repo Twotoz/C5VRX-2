@@ -45,6 +45,7 @@ jobs:
       - run: pip install numpy matplotlib
       - run: python tools/validate_trajectory.py
       - run: python tools/validate_phase5_quality.py
+      - run: python tools/validate_linear80.py
       - run: python tools/validate_continuous_pipeline.py
       - run: python tools/test_issue11_output.py
 
